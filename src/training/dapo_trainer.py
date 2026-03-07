@@ -84,15 +84,13 @@ class DAPOTrainer:
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.bfloat16,
-            device_map="auto"
-        )
+        ).to(self.device)
         self.ref_model.eval()
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.bfloat16,
-            device_map="auto"
-        )
+        ).to(self.device)
         
         # Apply LoRA
         lora_config = LoraConfig(

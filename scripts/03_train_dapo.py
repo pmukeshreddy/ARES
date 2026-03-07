@@ -38,6 +38,8 @@ def start_sglang_server(model_name: str, port: int) -> subprocess.Popen:
         "--model-path", model_name,
         "--port", str(port),
         "--trust-remote-code",
+        # Limit memory to 50% so PyTorch has space for training
+        "--mem-fraction-static", "0.5",
         # For H100
         "--dtype", "bfloat16"
     ]
