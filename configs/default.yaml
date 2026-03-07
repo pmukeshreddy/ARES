@@ -80,10 +80,33 @@ embeddings:
   output_file: "data/embeddings/comment_embeddings.npy"
   ids_file: "data/embeddings/comment_ids.json"
 
-# ─── Phase 2 DAPO (placeholder for future) ───────────
+# ─── Phase 2 DAPO ───────────
 dapo:
+  model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
+  output_dir: "checkpoints/dapo"
   reward_model_path: "checkpoints/reward_model/best"
-  # reward weights
+  
+  # LoRA
+  lora_r: 16
+  lora_alpha: 32
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+  lora_dropout: 0.05
+  
+  # Training
+  batch_size: 4
+  learning_rate: 1.0e-5
+  num_epochs: 1
+  
+  # GRPO
+  group_size: 8
+  clip_ratio_low: 0.2
+  clip_ratio_high: 0.28
+  dynamic_sampling: true
+  token_level_loss: true
+  kl_penalty: 0.0
+  max_new_tokens: 256
+  
+  # Reward Weights
   r1_weight: 0.35      # Reward model score
   r2_weight: 0.35      # Outcome match
   r3_weight: 0.15      # Calibration
