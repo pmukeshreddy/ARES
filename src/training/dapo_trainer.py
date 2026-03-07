@@ -44,31 +44,25 @@ class SGLangBridge:
                 "sampling_params": {
                     "temperature": 0.8,
                     "top_p": 0.95,
-                    "max_new_tokens": max_tokens,
-                    "n": n
+                    "max_new_tokens": max_tokens
+                    # "n" is ignored by sglang /generate, we loop manually
                 },
                 "lora_path": lora_path
             }
-            try:
-                resp = requests.post(url, json=payload).json()
-                if "text" in resp: # List if n > 1
-                    completions = resp["text"] if isinstance(resp["text"], list) else [resp["text"]]
-                    if len(completions) != n:
-                        # Fallback parsing for SGLang OpenAI compatible endpoint
-                        choices = resp.get("choices", [])
-                        if choices:
-                            completions = [c.get("text", c.get("message", {}).get("content", "")) for c in choices]
-                        # Pad if still short
-                        while len(completions) < n:
-                            completions.append("")
-                        completions = completions[:n]
-                        
-                    results.append(completions)
-                else:
-                    results.append([""] * n)
-            except Exception as e:
-                logger.error(f"SGLang generation failed: {e}")
-                results.append([""] * n)
+            
+            prompt_completions = []
+            for _ in range(n):
+                try:
+                    resp = requests.post(url, json=payload).json()
+                    completion = resp.get("text", "")
+                    if isinstance(completion, list): # just in case
+                        completion = completion[0] if len(completion) > 0 else ""
+                    prompt_completions.append(completion)
+                except Exception as e:
+                    logger.error(f"SGLang generation failed: {e}")
+                    prompt_completions.append("")
+                    
+            results.append(prompt_completions)
                 
         return results
 
