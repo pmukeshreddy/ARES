@@ -48,10 +48,11 @@ def parse_completion(completion: str) -> dict:
 class DAPORewardScales:
     """Computes the 4 components of the DAPO reward."""
     
-    def __init__(self, rm_model=None, tokenizer=None, device="cuda"):
+    def __init__(self, rm_model=None, tokenizer=None, device="cuda", config=None):
         self.rm_model = rm_model
         self.tokenizer = tokenizer
         self.device = device
+        self.config = config
         
     def compute_r1_reward_model(self, diffs: list, comments: list) -> list:
         """
