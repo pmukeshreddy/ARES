@@ -43,7 +43,9 @@ def start_sglang_server(model_name: str, port: int) -> subprocess.Popen:
     ]
     
     # Suppress STDOUT to not spam the training logs, but keep STDERR for crashes.
-    process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    # Write to file to prevent subprocess.PIPE from filling up and blocking.
+    log_file = open("sglang_server.log", "w")
+    process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file, text=True)
     
     # Wait for boot
     import requests
@@ -60,8 +62,11 @@ def start_sglang_server(model_name: str, port: int) -> subprocess.Popen:
         
     # If we get here, it probably crashed. Let's dump stderr
     logger.error("SGLang server failed to start within 120 seconds.")
-    _, stderr = process.communicate()
-    logger.error(f"SGLang STDERR: {stderr}")
+    try:
+        with open("sglang_server.log", "r") as f:
+            logger.error(f"SGLang Log Tail:\n{f.read()[-2000:]}")
+    except Exception:
+        pass
     process.terminate()
     sys.exit(1)
 
@@ -77,6 +82,7 @@ def main():
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
+        force=True
     )
     logger = logging.getLogger("dapo_main")
     
