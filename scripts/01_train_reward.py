@@ -63,6 +63,32 @@ def main():
     train_path = processed_dir / "train_small.jsonl"
     val_path = processed_dir / "val_small.jsonl"
     
+    # Auto-subsample if the small versions don't exist
+    if not train_path.exists() or not val_path.exists():
+        logger.info("Creating 25-minute ETA subsampled datasets (Train: 38k, Val: 5k) ...")
+        import random
+        random.seed(42)
+        
+        # Train
+        raw_train = processed_dir / "train.jsonl"
+        if raw_train.exists():
+            with open(raw_train, "r") as f:
+                lines = f.readlines()
+            sampled = random.sample(lines, min(len(lines), 38000))
+            with open(train_path, "w") as f:
+                f.writelines(sampled)
+            logger.info(f"Subsampled train -> {len(sampled)} samples")
+            
+        # Val
+        raw_val = processed_dir / "val.jsonl"
+        if raw_val.exists():
+            with open(raw_val, "r") as f:
+                lines = f.readlines()
+            sampled = random.sample(lines, min(len(lines), 5000))
+            with open(val_path, "w") as f:
+                f.writelines(sampled)
+            logger.info(f"Subsampled val -> {len(sampled)} samples")
+    
     if not train_path.exists() or not val_path.exists():
         logger.error(
             f"Processed data not found in {processed_dir}.\n"
