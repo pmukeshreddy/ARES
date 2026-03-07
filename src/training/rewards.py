@@ -204,18 +204,14 @@ class DAPORewardScales:
         total_rewards = []
         for i in range(batch_size):
             if config is not None:
-                w_r1 = config.get("r1_weight", 0.35)
-                w_r2 = config.get("r2_weight", 0.35)
-                w_r3 = config.get("r3_weight", 0.15)
-                w_r4 = config.get("r4_weight", 0.15)
+                w_r1 = config.get("r1_weight", 0.30)
+                w_r2 = config.get("r2_weight", 0.30)
+                w_r3 = config.get("r3_weight", 0.10)
+                w_r4 = config.get("r4_weight", 0.10)
+                w_r5 = config.get("r5_weight", 0.20)
             else:
                 # Fallback weights
-                w_r1, w_r2, w_r3, w_r4 = 0.35, 0.35, 0.15, 0.15
-                
-            # R5 Overlong penalty. To keep Total Reward scaled properly, 
-            # R5 does not need a weight subtracted from the others (it acts as a flat penalty),
-            # but we can weight the penalty itself.
-            w_r5 = 0.20
+                w_r1, w_r2, w_r3, w_r4, w_r5 = 0.30, 0.30, 0.10, 0.10, 0.20
             
             total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
