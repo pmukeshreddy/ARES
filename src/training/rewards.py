@@ -132,6 +132,26 @@ class DAPORewardScales:
         """
         return format_scores
         
+    def compute_r5_overlong_penalty(self, completions: list) -> list:
+        """
+        R5: Overlong Penalty (weight 0.20)
+        DAPO specific feature to penalize bloated reasoning traces.
+        If length > 600 characters (~150 tokens), apply progressive negative penalty.
+        Max penalty of -1.0 at 1600 characters.
+        """
+        rewards = []
+        for text in completions:
+            length = len(text)
+            if length < 600:
+                rewards.append(0.0)
+            elif length > 1600:
+                rewards.append(-1.0)
+            else:
+                # Linearly interpolate between 0.0 and -1.0
+                penalty = -((length - 600) / 1000.0)
+                rewards.append(penalty)
+        return rewards
+        
     def compute_total_reward(self, 
                              completions: list, 
                              diffs: list, 
@@ -165,12 +185,15 @@ class DAPORewardScales:
         # R4
         r4 = self.compute_r4_format(format_scores)
         
+        # R5 (DAPO Overlong Penalty)
+        r5 = self.compute_r5_overlong_penalty(completions)
+        
         # Total
         total_rewards = []
         for i in range(batch_size):
-            # Weights
-            w_r1, w_r2, w_r3, w_r4 = 0.35, 0.35, 0.15, 0.15
-            total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i])
+            # Weights (adjusted to accommodate R5)
+            w_r1, w_r2, w_r3, w_r4, w_r5 = 0.30, 0.30, 0.10, 0.10, 0.20
+            total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
             
         logs = {
@@ -178,6 +201,7 @@ class DAPORewardScales:
             "r2": sum(r2) / batch_size,
             "r3": sum(r3) / batch_size,
             "r4": sum(r4) / batch_size,
+            "r5_penalty": sum(r5) / batch_size,
             "total_reward": sum(total_rewards) / batch_size,
             "valid_format_ratio": sum(1 for p in format_scores if p == 1.0) / batch_size
         }

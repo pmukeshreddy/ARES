@@ -117,10 +117,10 @@ class DAPOTrainer:
         self.reward_scales = DAPORewardScales(rm_model, rm_tokenizer, device=self.device)
         self.sglang = SGLangBridge(port=self.config.get("sglang_port", 30000))
         
-        # GRPO Params
+        # GRPO / DAPO Params
         self.group_size = self.config["group_size"]  # N=8
-        self.clip_ratio = self.config["clip_ratio_high"]
-        
+        self.clip_ratio_low = self.config.get("clip_ratio_low", 0.2)
+        self.clip_ratio_high = self.config.get("clip_ratio_high", 0.28)
     def _get_logprobs(self, model, input_ids, mask=None):
         """Helper to get token-level log probabilities for the generated response."""
         outputs = model(input_ids, attention_mask=mask)
@@ -283,7 +283,15 @@ class DAPOTrainer:
                         adv = mb_adv[idx]
                         
                         surr1 = ratio * adv
-                        surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * adv
+                        
+                        # DAPO Asymmetric Decoupled Clipping
+                        # adv > 0 gets upper clipped. adv < 0 gets lower clipped.
+                        ratio_clipped = torch.where(
+                            adv > 0,
+                            torch.clamp(ratio, max=1.0 + self.clip_ratio_high),
+                            torch.clamp(ratio, min=1.0 - self.clip_ratio_low)
+                        )
+                        surr2 = ratio_clipped * adv
                         
                         # Token-level GRPO loss
                         token_loss = -torch.min(surr1, surr2).mean()
