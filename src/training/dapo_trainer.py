@@ -202,47 +202,63 @@ class DAPOTrainer:
                 # Convert prompts + completions to tensors
                 full_texts = [p + c for p, c in zip(flat_prompts, flat_completions)]
                 
-                inputs = self.tokenizer(full_texts, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(self.device)
-                prompt_inputs = self.tokenizer(flat_prompts, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(self.device)
+                # Micro-batching to prevent OOM on 3B model
+                micro_batch_size = 4
+                num_microbatches = (len(flat_prompts) + micro_batch_size - 1) // micro_batch_size
                 
-                # Mask out prompt tokens so loss is only on generated tokens
-                prompt_lens = prompt_inputs.attention_mask.sum(dim=1) - 1 # approximate index
+                loss_total_logging = 0.0
+                optimizer.zero_grad()
                 
-                with torch.no_grad():
-                    ref_log_probs = self._get_logprobs(self.ref_model, inputs.input_ids, inputs.attention_mask)
+                for mb_idx in range(0, len(flat_prompts), micro_batch_size):
+                    mb_full_texts = full_texts[mb_idx:mb_idx+micro_batch_size]
+                    mb_prompts = flat_prompts[mb_idx:mb_idx+micro_batch_size]
+                    mb_adv = flat_advantages[mb_idx:mb_idx+micro_batch_size]
                     
-                curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
-                
-                # Calculate ratio and clip per token
-                loss_total = 0.0
-                valid_tokens = 0
-                
-                for idx in range(len(flat_advantages)):
-                    start_idx = prompt_lens[idx]
-                    end_idx = inputs.attention_mask[idx].sum() - 1
+                    inputs = self.tokenizer(mb_full_texts, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(self.device)
+                    prompt_inputs = self.tokenizer(mb_prompts, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(self.device)
                     
-                    if start_idx >= end_idx:
-                        continue 
+                    # Mask out prompt tokens so loss is only on generated tokens
+                    prompt_lens = prompt_inputs.attention_mask.sum(dim=1) - 1 # approximate index
+                    
+                    with torch.no_grad():
+                        ref_log_probs = self._get_logprobs(self.ref_model, inputs.input_ids, inputs.attention_mask)
                         
-                    curr_logp = curr_log_probs[idx, start_idx:end_idx]
-                    ref_logp = ref_log_probs[idx, start_idx:end_idx]
+                    curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                     
-                    ratio = torch.exp(curr_logp - ref_logp)
-                    adv = flat_advantages[idx]
+                    # Calculate ratio and clip per token
+                    mb_loss = 0.0
+                    mb_valid_tokens = 0
                     
-                    surr1 = ratio * adv
-                    surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * adv
+                    for idx in range(len(mb_adv)):
+                        start_idx = prompt_lens[idx]
+                        end_idx = inputs.attention_mask[idx].sum() - 1
+                        
+                        if start_idx >= end_idx:
+                            continue 
+                            
+                        curr_logp = curr_log_probs[idx, start_idx:end_idx]
+                        ref_logp = ref_log_probs[idx, start_idx:end_idx]
+                        
+                        ratio = torch.exp(curr_logp - ref_logp)
+                        adv = mb_adv[idx]
+                        
+                        surr1 = ratio * adv
+                        surr2 = torch.clamp(ratio, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio) * adv
+                        
+                        # Token-level GRPO loss
+                        token_loss = -torch.min(surr1, surr2).mean()
+                        mb_loss += token_loss
+                        mb_valid_tokens += 1
                     
-                    # Token-level GRPO loss
-                    token_loss = -torch.min(surr1, surr2).mean()
-                    loss_total += token_loss
-                    valid_tokens += 1
+                    if mb_valid_tokens > 0:
+                        mb_loss = mb_loss / mb_valid_tokens
+                        # Scale for accumulation
+                        (mb_loss / num_microbatches).backward()
+                        loss_total_logging += mb_loss.item()
                 
-                if valid_tokens > 0:
-                    loss_total = loss_total / valid_tokens
-                    loss_total.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
+                # Step after accumulating all micro-batches
+                optimizer.step()
+                loss_total = torch.tensor(loss_total_logging / num_microbatches)
                 
                 global_step += 1
                 
