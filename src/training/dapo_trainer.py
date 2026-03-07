@@ -168,12 +168,13 @@ class DAPOTrainer:
                 # 1. Sync LoRA weights to disk for SGLang
                 self.model.save_pretrained(lora_sync_dir)
                 
-                # 2. Rollout 8 samples per prompt using SGLang
+                # 2. Rollout 16 samples per prompt using SGLang (oversampling)
                 # completions_grouped = List of length batch_size, where each element is a list of N strings
+                oversample_size = self.group_size * 2
                 completions_grouped = self.sglang.generate(
                     prompts=prompts,
                     lora_path=lora_sync_dir,
-                    n=self.group_size,
+                    n=oversample_size,
                     max_tokens=self.config.get("max_new_tokens", 256),
                     tokenizer=self.tokenizer
                 )
@@ -187,11 +188,11 @@ class DAPOTrainer:
                 
                 for b_idx in range(len(batch)):
                     group_comps = completions_grouped[b_idx]
-                    flat_prompts.extend([prompts[b_idx]] * self.group_size)
+                    flat_prompts.extend([prompts[b_idx]] * oversample_size)
                     flat_completions.extend(group_comps)
-                    flat_diffs.extend([diffs[b_idx]] * self.group_size)
-                    flat_comments.extend([comments[b_idx]] * self.group_size)
-                    flat_labels.extend([labels[b_idx]] * self.group_size)
+                    flat_diffs.extend([diffs[b_idx]] * oversample_size)
+                    flat_comments.extend([comments[b_idx]] * oversample_size)
+                    flat_labels.extend([labels[b_idx]] * oversample_size)
                 
                 # 3. Compute Rewards
                 rewards, logs = self.reward_scales.compute_total_reward(
@@ -200,15 +201,44 @@ class DAPOTrainer:
                 
                 # Format rewards into groups and calculate Advantage
                 rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-                rewards_grouped = rewards_tensor.view(-1, self.group_size)
+                rewards_grouped = rewards_tensor.view(-1, oversample_size)
                 
                 # A_i = (R_i - mean(R)) / (std(R) + eps)
                 mean_grouped = rewards_grouped.mean(dim=1, keepdim=True)
                 std_grouped = rewards_grouped.std(dim=1, keepdim=True)
                 advantages = (rewards_grouped - mean_grouped) / (std_grouped + 1e-8)
-                flat_advantages = advantages.view(-1)
                 
-                # 4. Compute GRPO Loss & Update
+                # 4. Dynamic Resampling: Keep only top 25% and bottom 25% of advantages
+                keep_per_group = self.group_size # e.g. 8
+                half_keep = keep_per_group // 2
+                
+                filtered_prompts = []
+                filtered_completions = []
+                filtered_advantages = []
+                
+                for b_idx in range(advantages.size(0)):
+                    group_advs = advantages[b_idx]
+                    
+                    # Sort indices by advantage
+                    sorted_indices = torch.argsort(group_advs, descending=True)
+                    
+                    # Pick highest `half_keep` and lowest `half_keep`
+                    top_indices = sorted_indices[:half_keep]
+                    bottom_indices = sorted_indices[-half_keep:]
+                    
+                    selected_indices = torch.cat([top_indices, bottom_indices]).cpu().tolist()
+                    
+                    for idx in selected_indices:
+                        flat_idx = b_idx * oversample_size + idx
+                        filtered_prompts.append(flat_prompts[flat_idx])
+                        filtered_completions.append(flat_completions[flat_idx])
+                        filtered_advantages.append(group_advs[idx].item())
+                
+                flat_prompts = filtered_prompts
+                flat_completions = filtered_completions
+                flat_advantages = torch.tensor(filtered_advantages, dtype=torch.float32, device=self.device)
+                
+                # 5. Compute GRPO Loss & Update on the filtered sequences
                 # Convert prompts + completions to tensors
                 full_texts = [p + c for p, c in zip(flat_prompts, flat_completions)]
                 
