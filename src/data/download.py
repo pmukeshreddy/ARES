@@ -56,110 +56,73 @@ def extract_zip(zip_path: str, extract_dir: str) -> str:
 
 def _parse_codereviewer_files(data_dir: str, split: str) -> list[dict]:
     """
-    Parse CodeReviewer's line-aligned text files into structured records.
+    Parse CodeReviewer's JSONL files into structured records.
     
-    CodeReviewer stores data in separate files:
-    - {split}.diff_hunk.src    → diff hunks (one per line)
-    - {split}.msg.src          → review comments (one per line)  
-    - {split}.code.src         → old code (one per line)
-    - {split}.code.tgt         → refined code / target (one per line)
-    
-    Lines are aligned: line N in each file corresponds to the same sample.
+    The Zenodo download provides:
+    - Code_Refinement/ref-{split}.jsonl
+    - Comment_Generation/msg-{split}.jsonl
     """
     data_dir = Path(data_dir)
     records = []
     
-    # Try multiple possible directory structures
-    possible_dirs = [
-        data_dir,
-        data_dir / "Code_Refinement",
-        data_dir / "code_refinement",
-        data_dir / "Refinement",
-    ]
+    # Check for jsonl files
+    jsonl_files = []
+    for pattern in [f"ref-{split}.jsonl", f"msg-{split}.jsonl", f"{split}.jsonl"]:
+        # Search recursively
+        for path in data_dir.rglob(pattern):
+            jsonl_files.append(path)
     
-    src_dir = None
-    for d in possible_dirs:
-        # Check for the text files in this directory or its subdirectories
-        diff_file = None
-        for pattern in [
-            f"{split}.diff_hunk.src",
-            f"{split}.diff.src",
-            f"ref-{split}.diff_hunk.src",
-        ]:
-            candidate = d / pattern
-            if candidate.exists():
-                diff_file = candidate
-                break
-            # Also check subdirectories
-            for sub in d.iterdir() if d.exists() else []:
-                if sub.is_dir():
-                    candidate = sub / pattern
-                    if candidate.exists():
-                        diff_file = candidate
-                        break
-        
-        if diff_file is not None:
-            src_dir = diff_file.parent
-            break
-    
-    if src_dir is None:
+    if not jsonl_files:
         logger.warning(
-            f"Could not find CodeReviewer {split} files in {data_dir}. "
-            f"Searched: {[str(d) for d in possible_dirs]}"
+            f"Could not find CodeReviewer {split} jsonl files targeting {data_dir}"
         )
-        # List what's actually in the directory for debugging
-        if data_dir.exists():
-            logger.info(f"Contents of {data_dir}: {list(data_dir.rglob('*'))[:20]}")
         return []
     
-    logger.info(f"Found CodeReviewer data in: {src_dir}")
+    logger.info(f"Found CodeReviewer {split} files: {[p.name for p in jsonl_files]}")
     
-    # Read all aligned files
-    def read_lines(filename_patterns: list[str]) -> list[str]:
-        for pattern in filename_patterns:
-            path = src_dir / pattern
-            if path.exists():
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    return [line.strip() for line in f]
-        return []
-    
-    diffs = read_lines([
-        f"{split}.diff_hunk.src", f"{split}.diff.src",
-        f"ref-{split}.diff_hunk.src"
-    ])
-    comments = read_lines([
-        f"{split}.msg.src", f"{split}.comment.src",
-        f"ref-{split}.msg.src"
-    ])
-    old_codes = read_lines([
-        f"{split}.code.src", f"ref-{split}.code.src"
-    ])
-    targets = read_lines([
-        f"{split}.code.tgt", f"ref-{split}.code.tgt"
-    ])
-    
-    if not diffs:
-        logger.warning(f"No diff data found for split '{split}' in {src_dir}")
-        return []
-    
-    n = len(diffs)
-    comments = comments if len(comments) == n else [""] * n
-    old_codes = old_codes if len(old_codes) == n else [""] * n
-    targets = targets if len(targets) == n else [""] * n
-    
-    for i in range(n):
-        target = targets[i]
-        # Label: 1 if developer acted on comment (non-empty target different from source)
-        has_target = bool(target and target.strip() and target.strip() != old_codes[i].strip())
-        
-        records.append({
-            "diff_hunk": diffs[i],
-            "comment": comments[i],
-            "old_code": old_codes[i],
-            "target": target,
-            "label": 1 if has_target else 0,
-            "source": "codereviewer",
-        })
+    for file_path in jsonl_files:
+        logger.info(f"Parsing {file_path}...")
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                
+                # Extract fields (names might vary slightly between tasks)
+                diff_hunk = obj.get("diff_hunk", obj.get("patch", ""))
+                comment = obj.get("comment", obj.get("msg", ""))
+                old_code = obj.get("old_code", obj.get("old_file", ""))
+                target = obj.get("target", obj.get("refinement", ""))
+                
+                if not diff_hunk or not comment:
+                    continue
+                
+                # Label: 1 if developer acted on comment (non-empty target different from source)
+                # In Comment_Generation, 'target' is missing or just the comment.
+                # In Code_Refinement, 'target' is the refined code.
+                if "refinement" in obj or "target" in obj:
+                    has_target = bool(target and target.strip() and target.strip() != old_code.strip())
+                    label = 1 if has_target else 0
+                else:
+                    # If there's no target field at all, we can't be sure it was acted on.
+                    # For safety in training reward model, we might skip these or label 0,
+                    # but let's assume Comment_Generation samples without a target
+                    # might not represent "acted upon" code changes.
+                    label = 0
+                
+                records.append({
+                    "diff_hunk": diff_hunk,
+                    "comment": comment,
+                    "old_code": old_code,
+                    "target": target,
+                    "label": label,
+                    "source": f"codereviewer_{file_path.parent.name}",
+                })
     
     logger.info(f"Parsed {len(records)} CodeReviewer {split} samples "
                 f"(label=1: {sum(r['label'] for r in records)}, "
