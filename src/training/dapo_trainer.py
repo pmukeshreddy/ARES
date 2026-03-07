@@ -23,18 +23,24 @@ class SGLangBridge:
     def __init__(self, port=30000):
         self.base_url = f"http://localhost:{port}"
         
-    def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256) -> List[List[str]]:
+    def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256, tokenizer=None) -> List[List[str]]:
         """Generates N completions per prompt using SGLang's API."""
-        # Note: In a real SGLang production setup we'd use /generate with lora_path 
-        # For simplicity in this script, we assume a single prompt batched to N
-        # If we have multiple prompts in a batch (e.g., batch_size=4), we send 4x8 requests.
-        
         url = f"{self.base_url}/generate"
         results = []
         
         for p in prompts:
+            # Format prompt with ChatML template so the Instruct model understands it
+            if tokenizer is not None:
+                messages = [
+                    {"role": "system", "content": "You are a helpful AI code reviewer."},
+                    {"role": "user", "content": p}
+                ]
+                formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            else:
+                formatted_prompt = f"<|im_start|>system\nYou are a helpful AI code reviewer.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
+                
             payload = {
-                "text": p,
+                "text": formatted_prompt,
                 "sampling_params": {
                     "temperature": 0.8,
                     "top_p": 0.95,
@@ -168,7 +174,8 @@ class DAPOTrainer:
                     prompts=prompts,
                     lora_path=lora_sync_dir,
                     n=self.group_size,
-                    max_tokens=self.config.get("max_new_tokens", 256)
+                    max_tokens=self.config.get("max_new_tokens", 256),
+                    tokenizer=self.tokenizer
                 )
                 
                 # Flatten for processing
