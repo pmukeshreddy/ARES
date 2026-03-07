@@ -92,6 +92,9 @@ class DAPOTrainer:
             torch_dtype=torch.bfloat16,
         ).to(self.device)
         
+        # Turn on Gradient Checkpointing to save massive VRAM during backward passes
+        self.model.gradient_checkpointing_enable({"use_reentrant": False})
+        
         # Apply LoRA
         lora_config = LoraConfig(
             r=self.config["lora_r"],
@@ -203,7 +206,7 @@ class DAPOTrainer:
                 full_texts = [p + c for p, c in zip(flat_prompts, flat_completions)]
                 
                 # Micro-batching to prevent OOM on 3B model
-                micro_batch_size = 4
+                micro_batch_size = 2
                 num_microbatches = (len(flat_prompts) + micro_batch_size - 1) // micro_batch_size
                 
                 loss_total_logging = 0.0
