@@ -291,9 +291,9 @@ class RewardModel(nn.Module):
         else:
             dtype = torch.float32
         
-        # Load tokenizer
+        # Load tokenizer directly from HF to avoid peft/fast-tokenizer serialization bugs
         tokenizer = AutoTokenizer.from_pretrained(
-            str(save_dir / "tokenizer"), trust_remote_code=True
+            model_name, trust_remote_code=True
         )
         
         # Load base model + LoRA
