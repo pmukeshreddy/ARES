@@ -60,8 +60,8 @@ def main():
     
     # Check data exists
     processed_dir = Path(PROJECT_ROOT) / config["data"]["processed_dir"]
-    train_path = processed_dir / "train.jsonl"
-    val_path = processed_dir / "val.jsonl"
+    train_path = processed_dir / "train_small.jsonl"
+    val_path = processed_dir / "val_small.jsonl"
     
     if not train_path.exists() or not val_path.exists():
         logger.error(

@@ -60,7 +60,7 @@ reward_model:
   bf16: true                      # Use bf16 on A100/H100
   
   # Validation
-  eval_steps: 200                 # Evaluate every N steps
+  eval_steps: 500                 # Evaluate every N steps
   auroc_target: 0.70              # Minimum acceptable AUROC
   auroc_warning: 0.65             # Warn if AUROC drops below
   
