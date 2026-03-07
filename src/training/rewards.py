@@ -167,7 +167,8 @@ class DAPORewardScales:
                              completions: list, 
                              diffs: list, 
                              comments: list, 
-                             labels: list) -> dict:
+                             labels: list,
+                             config: dict = None) -> dict:
         """
         Computes total reward for a batch of completions.
         Returns total_rewards list and a dict of component averages for logging.
@@ -202,8 +203,19 @@ class DAPORewardScales:
         # Total
         total_rewards = []
         for i in range(batch_size):
-            # Weights (adjusted to accommodate R5)
-            w_r1, w_r2, w_r3, w_r4, w_r5 = 0.30, 0.30, 0.10, 0.10, 0.20
+            if config is not None and "reward_weights" in config:
+                weights = config["reward_weights"]
+                w_r1 = weights.get("r1_model", 0.3)
+                w_r2 = weights.get("r2_match", 0.3)
+                w_r3 = weights.get("r3_calibration", 0.1)
+                w_r4 = weights.get("r4_format", 0.1)
+            else:
+                # Fallback weights
+                w_r1, w_r2, w_r3, w_r4 = 0.30, 0.30, 0.10, 0.10
+                
+            # R5 Overlong penalty (hardcoded to 0.20 as standard DAPO R5)
+            w_r5 = 0.20
+            
             total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
             

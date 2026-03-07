@@ -53,11 +53,17 @@ class SGLangBridge:
                 resp = requests.post(url, json=payload).json()
                 if "text" in resp: # List if n > 1
                     completions = resp["text"] if isinstance(resp["text"], list) else [resp["text"]]
-                    # If the API returned fewer than N (e.g. single string for n=1), pad or handle
                     if len(completions) != n:
-                        # Fallback parsing depending on sglang version
-                        completions = [c["text"] for c in resp.get("choices", [{"text": ""}])] * n
-                    results.append(completions[:n])
+                        # Fallback parsing for SGLang OpenAI compatible endpoint
+                        choices = resp.get("choices", [])
+                        if choices:
+                            completions = [c.get("text", c.get("message", {}).get("content", "")) for c in choices]
+                        # Pad if still short
+                        while len(completions) < n:
+                            completions.append("")
+                        completions = completions[:n]
+                        
+                    results.append(completions)
                 else:
                     results.append([""] * n)
             except Exception as e:
@@ -114,7 +120,7 @@ class DAPOTrainer:
         self.model.print_trainable_parameters()
         
         # Rewards & SGLang Bridge
-        self.reward_scales = DAPORewardScales(rm_model, rm_tokenizer, device=self.device)
+        self.reward_scales = DAPORewardScales(rm_model, rm_tokenizer, device=self.device, config=self.config)
         self.sglang = SGLangBridge(port=self.config.get("sglang_port", 30000))
         
         # GRPO / DAPO Params
@@ -196,7 +202,7 @@ class DAPOTrainer:
                 
                 # 3. Compute Rewards
                 rewards, logs = self.reward_scales.compute_total_reward(
-                    flat_completions, flat_diffs, flat_comments, flat_labels
+                    flat_completions, flat_diffs, flat_comments, flat_labels, self.config
                 )
                 
                 # Format rewards into groups and calculate Advantage
@@ -258,7 +264,8 @@ class DAPOTrainer:
                     prompt_inputs = self.tokenizer(mb_prompts, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(self.device)
                     
                     # Mask out prompt tokens so loss is only on generated tokens
-                    prompt_lens = prompt_inputs.attention_mask.sum(dim=1) - 1 # approximate index
+                    # The sum of mask gives the exact index where generation starts (since it's 0-indexed)
+                    prompt_lens = prompt_inputs.attention_mask.sum(dim=1)
                     
                     with torch.no_grad():
                         ref_log_probs = self._get_logprobs(self.ref_model, inputs.input_ids, inputs.attention_mask)
