@@ -1,0 +1,90 @@
+# ═══════════════════════════════════════════════════════
+# RLCR v2 Configuration
+# ═══════════════════════════════════════════════════════
+
+# ─── Data ─────────────────────────────────────────────
+data:
+  # CodeReviewer dataset (Zenodo)
+  codereviewer_url: "https://zenodo.org/records/6900648/files/Code_Refinement.zip"
+  codereviewer_comment_url: "https://zenodo.org/records/6900648/files/Comment_Generation.zip"
+  
+  # ronantakizawa dataset (HuggingFace) - for Phase 2 team simulation
+  hf_dataset: "ronantakizawa/github-codereview"
+  
+  # Paths (relative to project root)
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  embeddings_dir: "data/embeddings"
+  
+  # Filtering
+  min_comment_words: 3            # Remove comments with fewer words
+  max_diff_tokens: 2048           # Remove diffs exceeding this token count
+  max_input_tokens: 1024          # Truncate model input to this length
+  remove_bots: true
+  remove_non_english: true
+  
+  # Splits
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 42
+
+# ─── Reward Model (Phase 1) ──────────────────────────
+reward_model:
+  # Base model
+  model_name: "Qwen/Qwen2.5-Coder-1.5B"   # Or "Qwen/Qwen2.5-Coder-7B"
+  
+  # LoRA config
+  lora_r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  lora_target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+  
+  # Classification head
+  hidden_dim: 256                 # Intermediate dim before sigmoid
+  dropout: 0.1
+  
+  # Training
+  batch_size: 32
+  gradient_accumulation_steps: 1
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  num_epochs: 3
+  max_grad_norm: 1.0
+  fp16: false
+  bf16: true                      # Use bf16 on A100/H100
+  
+  # Validation
+  eval_steps: 200                 # Evaluate every N steps
+  auroc_target: 0.70              # Minimum acceptable AUROC
+  auroc_warning: 0.65             # Warn if AUROC drops below
+  
+  # Checkpointing
+  output_dir: "checkpoints/reward_model"
+  save_best_only: true
+  
+  # Logging
+  log_steps: 50
+  use_wandb: false
+  wandb_project: "rlcr-v2"
+
+# ─── Embeddings ──────────────────────────────────────
+embeddings:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  batch_size: 256
+  output_file: "data/embeddings/comment_embeddings.npy"
+  ids_file: "data/embeddings/comment_ids.json"
+
+# ─── Phase 2 DAPO (placeholder for future) ───────────
+dapo:
+  reward_model_path: "checkpoints/reward_model/best"
+  # reward weights
+  r1_weight: 0.35      # Reward model score
+  r2_weight: 0.35      # Outcome match
+  r3_weight: 0.15      # Calibration
+  r4_weight: 0.15      # Format compliance
