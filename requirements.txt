@@ -4,6 +4,7 @@ transformers>=4.37.0
 peft>=0.7.0
 datasets>=2.16.0
 accelerate>=0.25.0
+flash-attn>=2.0.0
 
 # Embeddings
 sentence-transformers>=2.3.0
