@@ -84,17 +84,14 @@ class DAPOTrainer:
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
-            attn_implementation="flash_attention_2"
+            device_map="auto"
         )
         self.ref_model.eval()
         
-        # We load a trainable model (base + LoRA)
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             torch_dtype=torch.bfloat16,
-            device_map="auto",
-            attn_implementation="flash_attention_2"
+            device_map="auto"
         )
         
         # Apply LoRA
