@@ -240,17 +240,18 @@ def train_reward_model(
             epoch_loss += loss.item() * grad_accum_steps
             epoch_steps += 1
             
+            # Live TQDM update
+            avg_loss = epoch_loss / epoch_steps
+            current_lr = optimizer.param_groups[0]["lr"]
+            pbar.set_postfix({
+                "loss": f"{avg_loss:.4f}",
+                "lr": f"{current_lr:.2e}",
+                "step": global_step,
+            })
+            
             # Logging
             if global_step % log_steps == 0 and global_step > 0:
-                avg_loss = epoch_loss / epoch_steps
-                current_lr = optimizer.param_groups[0]["lr"]
                 elapsed = time.time() - start_time
-                
-                pbar.set_postfix({
-                    "loss": f"{avg_loss:.4f}",
-                    "lr": f"{current_lr:.2e}",
-                    "step": global_step,
-                })
                 
                 if use_wandb:
                     wandb.log({
