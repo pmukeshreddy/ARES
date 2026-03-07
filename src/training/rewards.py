@@ -73,21 +73,32 @@ class DAPORewardScales:
                 text = f"{d[:2048]} [SEP] {c[:512]}"
                 inputs.append(text)
                 
-            tokenized = self.tokenizer(
-                inputs,
-                padding=True,
-                truncation=True,
-                max_length=1024,
-                return_tensors="pt"
-            ).to(self.device)
-            
-            # The Phase 1 model outputs logits
-            logits = self.rm_model(tokenized.input_ids, tokenized.attention_mask).squeeze(-1)
-            probs = torch.sigmoid(logits).cpu().tolist()
-            
-            # Scale [0, 1] to [-1, 1]
-            rm_scores = [(p * 2.0) - 1.0 for p in probs]
-            
+            # Micro-batching to avoid OOM when evaluating 64 samples at once
+            micro_batch_size = 8
+            for i in range(0, len(inputs), micro_batch_size):
+                batch_inputs = inputs[i:i+micro_batch_size]
+                
+                tokenized = self.tokenizer(
+                    batch_inputs,
+                    padding=True,
+                    truncation=True,
+                    max_length=1024,
+                    return_tensors="pt"
+                ).to(self.device)
+                
+                # The Phase 1 model outputs logits
+                logits = self.rm_model(tokenized.input_ids, tokenized.attention_mask).squeeze(-1)
+                
+                # Handle scalar case if batch size is 1
+                if logits.dim() == 0:
+                    logits = logits.unsqueeze(0)
+                    
+                probs = torch.sigmoid(logits).cpu().tolist()
+                
+                # Scale [0, 1] to [-1, 1]
+                batch_scores = [(p * 2.0) - 1.0 for p in probs]
+                rm_scores.extend(batch_scores)
+                
         return rm_scores
 
     def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list) -> list:
