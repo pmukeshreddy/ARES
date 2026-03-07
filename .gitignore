@@ -6,8 +6,8 @@ dist/
 build/
 
 # Data (large files, download locally)
-data/
-checkpoints/
+/data/
+/checkpoints/
 
 # Environment
 .venv/
