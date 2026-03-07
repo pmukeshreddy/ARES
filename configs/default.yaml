@@ -49,8 +49,8 @@ reward_model:
   dropout: 0.1
   
   # Training
-  batch_size: 32
-  gradient_accumulation_steps: 1
+  batch_size: 16
+  gradient_accumulation_steps: 2
   learning_rate: 2.0e-5
   weight_decay: 0.01
   warmup_ratio: 0.05
