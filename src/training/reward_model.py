@@ -213,6 +213,7 @@ class RewardModel(nn.Module):
             model_name,
             torch_dtype=dtype,
             trust_remote_code=True,
+            attn_implementation="flash_attention_2",
             # Don't load to GPU yet, let caller handle device placement
             device_map=None,
         )
