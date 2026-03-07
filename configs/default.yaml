@@ -49,12 +49,12 @@ reward_model:
   dropout: 0.1
   
   # Training
-  batch_size: 4
-  gradient_accumulation_steps: 8
+  batch_size: 32
+  gradient_accumulation_steps: 1
   learning_rate: 2.0e-5
   weight_decay: 0.01
   warmup_ratio: 0.05
-  num_epochs: 3
+  num_epochs: 1
   max_grad_norm: 1.0
   fp16: false
   bf16: true                      # Use bf16 on A100/H100
