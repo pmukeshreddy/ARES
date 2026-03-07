@@ -113,7 +113,7 @@ def main():
         
     logger.info("Loading Phase 1 Reward Model for R1 / R3 computation...")
     # Load base model from HF, adapters from local
-    rm_model = RewardModel.from_pretrained(str(rm_path))
+    rm_model = RewardModel.load_checkpoint(str(rm_path), config)
     rm_model = rm_model.to("cuda")
     rm_model.eval()
     
