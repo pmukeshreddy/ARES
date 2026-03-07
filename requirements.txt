@@ -22,3 +22,4 @@ langdetect>=1.0.9
 
 # Optional
 # wandb>=0.16.0
+sglang[all]
