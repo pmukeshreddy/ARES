@@ -55,8 +55,9 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str):
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    # Initialize buckets
-    team_data = {team: [] for team in TEAM_PROFILES.keys()}
+    # Initialize buckets for balancing
+    team_data_surface = {team: [] for team in TEAM_PROFILES.keys()}
+    team_data_filter = {team: [] for team in TEAM_PROFILES.keys()}
     
     logger.info(f"Loading base dataset from {hf_dataset_path}")
     # Load dataset
@@ -87,28 +88,44 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str):
         
         prompt = generate_prompt(diff, comment, team_name)
         
-        team_data[team_name].append({
+        sample = {
             "prompt": prompt,
             "diff": diff,
             "comment": comment,
             "label": team_label,
             "team": team_name
-        })
+        }
+        
+        if team_label == 1:
+            team_data_surface[team_name].append(sample)
+        else:
+            team_data_filter[team_name].append(sample)
             
     logger.info(f"Ignored {missing_count} samples that didn't match any team keywords.")
     
     # Save datasets
     # The requirement is 20-50 train samples, 200+ test samples per team
-    for team_name, samples in team_data.items():
-        if len(samples) < 250:
-            logger.warning(f"Team {team_name} only got {len(samples)} samples. Simulation might be weak.")
+    for team_name in TEAM_PROFILES.keys():
+        surfaces = team_data_surface[team_name]
+        filters = team_data_filter[team_name]
         
-        # Shuffle
+        # Balance 50/50
+        min_len = min(len(surfaces), len(filters))
+        if min_len < 125: # Need 250 total (125 each) for 50 train / 200 test
+            logger.warning(f"Team {team_name} only got {min_len*2} balanced samples. Simulation might be weak.")
+            
+        random.shuffle(surfaces)
+        random.shuffle(filters)
+        
+        # Take equal amounts
+        samples = surfaces[:min_len] + filters[:min_len]
+        
+        # Shuffle matched dataset
         random.shuffle(samples)
         
-        # Take 50 for train, 200 for test
+        # Take 50 for train, 200 for test (or whatever is available)
         train_samples = samples[:50]
-        test_samples = samples[50:250]
+        test_samples = samples[50:250] if len(samples) >= 250 else samples[50:]
         
         team_dir = out_dir / team_name.lower().replace("-", "_")
         team_dir.mkdir(exist_ok=True)
