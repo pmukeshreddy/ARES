@@ -35,7 +35,7 @@ def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subpro
     # --lora-paths allows dynamic swapping later via the API.
     
     lora_rank = str(dapo_config.get("lora_r", 16))
-    lora_targets = ",".join(dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"]))
+    lora_targets = dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
     
     cmd = [
         "python3", "-m", "sglang.launch_server",
@@ -45,7 +45,8 @@ def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subpro
         # Enable dynamic LoRA reloading during runtime
         "--enable-lora",
         "--max-lora-rank", lora_rank,
-        "--lora-target-modules", lora_targets,
+        "--lora-target-modules"
+    ] + lora_targets + [
         # Limit memory to 50% so PyTorch has space for training
         "--mem-fraction-static", "0.5",
         # For H100
