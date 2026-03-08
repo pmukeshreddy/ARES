@@ -165,21 +165,30 @@ class DAPORewardScales:
                 rm_scores.extend(probs)
         return rm_scores
 
-    def compute_r3_rm_agreement(self, decisions: list, diffs: list, comments: list) -> list:
+    def compute_r3_score_calibration(self, m_scores: list, diffs: list, comments: list) -> list:
         """
-        R3: RM Agreement (weight 0.10)
-        Compares DAPO model's decision against Phase 1 RM's binary prediction.
-        Transfers the RM's F1=0.99 classification knowledge into DAPO training.
+        R3: Score Calibration
+        Compares DAPO model's `<score>` against the Phase 1 RM's continuous score.
+        Reward = 1.0 - (2.0 * |dapo_score - rm_score|)
+        This transfers the F1=0.99 RM's knowledge of actionability probability
+        without dictating the binary <decision>, which should be based on team threshold.
         """
         rm_scores = self._get_rm_scores(diffs, comments)
         
         rewards = []
-        for dec, rm_score in zip(decisions, rm_scores):
-            rm_decision = "SURFACE" if rm_score > 0.5 else "FILTER"
-            if dec == rm_decision:
-                rewards.append(1.0)   # Agrees with F1=0.99 RM
+        for m_score, rm_score in zip(m_scores, rm_scores):
+            if m_score is None:
+                rewards.append(-1.0)
             else:
-                rewards.append(-0.5)  # Disagrees (softer penalty — team context may override RM)
+                try:
+                    score_val = float(m_score)
+                    diff = abs(score_val - rm_score)
+                    # Perfect match = 1.0, max disconnect (1.0 off) = -1.0
+                    r = 1.0 - (2.0 * diff)
+                    rewards.append(max(-1.0, min(1.0, r)))
+                except ValueError:
+                    rewards.append(-1.0)
+                    
         return rewards
 
     def compute_r4_format(self, format_scores: list) -> list:
@@ -265,8 +274,8 @@ class DAPORewardScales:
         # R2
         r2 = self.compute_r2_outcome_match(decisions, labels)
         
-        # R3: RM Agreement (transfers Phase 1 F1=0.99 knowledge)
-        r3 = self.compute_r3_rm_agreement(decisions, diffs, comments)
+        # R3: Score Calibration (calibrates <score> output to Phase 1 RM)
+        r3 = self.compute_r3_score_calibration(m_scores, diffs, comments)
         
         # R4
         r4 = self.compute_r4_format(format_scores)
