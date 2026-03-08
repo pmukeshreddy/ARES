@@ -41,16 +41,9 @@ class SGLangBridge:
         return resp.json()
 
     def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256, tokenizer=None) -> List[List[str]]:
-        """Generates N completions per prompt using SGLang's API.
-        
-        Forced Exploration: generates n/2 completions normally and n/2 with a
-        SURFACE-biased prefix to guarantee diversity. Without this, the model
-        generates all-FILTER groups → zero advantage variance → no learning.
-        """
+        """Generates N completions per prompt using SGLang's API."""
         url = f"{self.base_url}/generate"
         results = []
-        
-        half_n = n // 2
         
         for p in prompts:
             # Format prompt with ChatML template
@@ -62,27 +55,20 @@ class SGLangBridge:
                 formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             else:
                 formatted_prompt = f"<|im_start|>system\nYou are a helpful AI code reviewer.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
-            
-            # SURFACE-exploration prefix: starts the <think> with a surface-leaning sentence
-            # This doesn't force the decision — the model still reasons and can end up at FILTER
-            # But it ensures the group has SOME completions that explore the SURFACE path
-            surface_prefix = "<think>\nThis comment raises a valid concern that aligns with the team's priorities. Let me analyze why."
-            formatted_prompt_explore = formatted_prompt + surface_prefix
                 
-            prompt_completions = []
+            payload = {
+                "text": formatted_prompt,
+                "sampling_params": {
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "max_new_tokens": max_tokens
+                },
+                "lora_path": lora_path
+            }
             
-            # First half: normal generation (model chooses freely)
-            for i in range(half_n):
+            prompt_completions = []
+            for i in range(n):
                 try:
-                    payload = {
-                        "text": formatted_prompt,
-                        "sampling_params": {
-                            "temperature": 1.0,
-                            "top_p": 0.95,
-                            "max_new_tokens": max_tokens
-                        },
-                        "lora_path": lora_path
-                    }
                     resp = requests.post(url, json=payload).json()
                     
                     if i == 0:
@@ -94,30 +80,6 @@ class SGLangBridge:
                     prompt_completions.append(completion)
                 except Exception as e:
                     logger.error(f"SGLang generation failed: {e}")
-                    prompt_completions.append("")
-            
-            # Second half: SURFACE-exploration generation (seeded with surface-leaning prefix)
-            for i in range(n - half_n):
-                try:
-                    payload = {
-                        "text": formatted_prompt_explore,
-                        "sampling_params": {
-                            "temperature": 1.0,
-                            "top_p": 0.95,
-                            "max_new_tokens": max_tokens
-                        },
-                        "lora_path": lora_path
-                    }
-                    resp = requests.post(url, json=payload).json()
-                    
-                    completion = resp.get("text", "")
-                    if isinstance(completion, list):
-                        completion = completion[0] if len(completion) > 0 else ""
-                    # Prepend the surface prefix to get the full completion
-                    completion = surface_prefix + completion
-                    prompt_completions.append(completion)
-                except Exception as e:
-                    logger.error(f"SGLang exploration generation failed: {e}")
                     prompt_completions.append("")
                     
             results.append(prompt_completions)
@@ -194,23 +156,38 @@ class DAPOTrainer:
         """Trains the DAPO model for a single team."""
         logger.info(f"\n{'='*50}\nStarting DAPO training for team: {team_name}\n{'='*50}")
         
-        # Load SFT warm-up weights if available, otherwise random init
+        # Load SFT warm-up weights into BOTH the training model AND the reference model
+        # KL penalty against SFT ref prevents collapse toward all-FILTER
+        # because drifting from the 50/50 SFT prior incurs a KL cost
         sft_warmup_path = Path("checkpoints/sft_warmup") / f"sft_warmup_{team_name}"
         if sft_warmup_path.exists():
             logger.info(f"Loading SFT warm-up weights from {sft_warmup_path}")
-            # Load adapter weights from the SFT checkpoint
             import safetensors.torch
             sft_state = safetensors.torch.load_file(str(sft_warmup_path / "adapter_model.safetensors"))
+            
+            # Load into training model
             model_state = self.model.state_dict()
             for key in sft_state:
                 if key in model_state:
                     model_state[key].copy_(sft_state[key])
-            logger.info(f"SFT warm-up weights loaded for {team_name}")
+            logger.info(f"SFT warm-up weights loaded into training model for {team_name}")
+            
+            # Load SFT as reference model (apply LoRA to ref_model temporarily)
+            from peft import PeftModel
+            ref_lora = PeftModel.from_pretrained(
+                self.ref_model, 
+                str(sft_warmup_path),
+                is_trainable=False
+            )
+            ref_lora.eval()
+            self._sft_ref_model = ref_lora
+            logger.info(f"SFT warm-up loaded as KL reference model for {team_name}")
         else:
             logger.info(f"No SFT warm-up found at {sft_warmup_path}, using random LoRA init")
             for name, param in self.model.named_parameters():
                 if "lora" in name:
                     torch.nn.init.normal_(param, std=0.01)
+            self._sft_ref_model = None
                 
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config["learning_rate"])
         
@@ -364,14 +341,16 @@ class DAPOTrainer:
                     prompt_lens = prompt_inputs.attention_mask.sum(dim=1)
                     
                     with torch.no_grad():
-                        ref_log_probs = self._get_logprobs(self.ref_model, inputs.input_ids, inputs.attention_mask)
+                        # Use SFT ref model for KL if available (prevents FILTER collapse)
+                        ref_model = self._sft_ref_model if self._sft_ref_model is not None else self.ref_model
+                        ref_log_probs = self._get_logprobs(ref_model, inputs.input_ids, inputs.attention_mask)
                         
                     curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                     
                     # Calculate ratio and clip per token
                     mb_loss = 0.0
                     mb_valid_tokens = 0
-                    kl_penalty_weight = self.config.get("kl_penalty", 0.04)
+                    kl_penalty_weight = self.config.get("kl_penalty", 0.10)
                     
                     for idx in range(len(mb_adv)):
                         start_idx = prompt_lens[idx]

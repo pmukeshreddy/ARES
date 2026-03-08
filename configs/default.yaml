@@ -103,7 +103,7 @@ dapo:
   clip_ratio_high: 0.28
   dynamic_sampling: true
   token_level_loss: true
-  kl_penalty: 0.04
+  kl_penalty: 0.10
   max_new_tokens: 256
   
   # Reward Weights
