@@ -304,6 +304,7 @@ class DAPOTrainer:
                     # Calculate ratio and clip per token
                     mb_loss = 0.0
                     mb_valid_tokens = 0
+                    kl_penalty_weight = self.config.get("dapo", {}).get("kl_penalty", 0.04)
                     
                     for idx in range(len(mb_adv)):
                         start_idx = prompt_lens[idx]
@@ -329,8 +330,11 @@ class DAPOTrainer:
                         )
                         surr2 = ratio_clipped * adv
                         
-                        # Token-level GRPO loss
-                        token_loss = -torch.min(surr1, surr2).mean()
+                        # KL divergence estimator to prevent unbounded drift from base model
+                        kl = torch.exp(ref_logp - curr_logp) - (ref_logp - curr_logp) - 1.0
+                        
+                        # Token-level GRPO loss + KL Penalty
+                        token_loss = -torch.min(surr1, surr2).mean() + kl_penalty_weight * kl.mean()
                         mb_loss += token_loss
                         mb_valid_tokens += 1
                     

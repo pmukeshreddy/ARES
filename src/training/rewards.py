@@ -78,14 +78,14 @@ class DAPORewardScales:
                 rewards.append(-0.5)
                 continue
                 
-            # 2. Context groundedness (lexical overlap of significant words)
+            # 2. Context groundedness (must overlap with DIFF specifically)
             import re
-            context_words = set(re.findall(r'\b[a-z]{5,}\b', diff_comment_lower))
+            diff_words = set(re.findall(r'\b[a-z]{5,}\b', diff.lower()[:1500])) # Truncated diff
             think_words = set(re.findall(r'\b[a-z]{5,}\b', think_lower))
-            overlap = len(context_words.intersection(think_words))
+            overlap_diff = len(diff_words.intersection(think_words))
             
-            if overlap < 2:
-                # Hallucinated reasoning, doesn't actually discuss the code or comment
+            if overlap_diff < 4:
+                # Hallucinated reasoning, doesn't actually discuss the code
                 rewards.append(-0.5)
                 continue
                 
@@ -97,10 +97,10 @@ class DAPORewardScales:
                 continue
                 
             # Continuous reward based on groundedness (capped at 10 overlapping significant words)
-            overlap_score = min(1.0, overlap / 10.0)
+            overlap_score = min(1.0, overlap_diff / 10.0)
             
-            # Continuous reward based on length (sweet spot up to 500 chars)
-            len_score = min(1.0, len(think) / 500.0)
+            # Continuous reward based on length (sweet spot up to 300 chars, R5 penalizes > 800)
+            len_score = min(1.0, len(think) / 300.0)
             
             # Final R1 score is a blend of groundedness and sufficient length
             r = (overlap_score * 0.7) + (len_score * 0.3)
@@ -119,13 +119,33 @@ class DAPORewardScales:
         rewards = []
         for dec, label in zip(decisions, ground_truth_labels):
             if dec == "SURFACE":
-                r = 1.0 if label == 1 else -2.0
+                r = 1.0 if label == 1 else -1.2
             elif dec == "FILTER":
-                r = 1.0 if label == 0 else -0.5
+                r = 1.0 if label == 0 else -0.8
             else:
                 r = -1.0 # Invalid decision
             rewards.append(r)
         return rewards
+
+    def _get_rm_scores(self, diffs: list, comments: list) -> list:
+        """Helper to get actual scores from the Phase 1 reward model."""
+        if self.rm_model is None:
+            return [0.5] * len(diffs)
+            
+        rm_scores = []
+        rm_batch_size = 8
+        self.rm_model.eval()
+        with torch.no_grad():
+            for i in range(0, len(diffs), rm_batch_size):
+                b_diffs = diffs[i:i+rm_batch_size]
+                b_comments = comments[i:i+rm_batch_size]
+                prompts = [f"{d[:2048]} [SEP] {c[:512]}" for d, c in zip(b_diffs, b_comments)]
+                inputs = self.tokenizer(prompts, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(self.device)
+                outputs = self.rm_model(**inputs)
+                probs = torch.sigmoid(outputs.logits).squeeze(-1).cpu().tolist()
+                if not isinstance(probs, list): probs = [probs]
+                rm_scores.extend(probs)
+        return rm_scores
 
     def compute_r3_calibration(self, model_scores: list, rm_scores_0_1: list) -> list:
         """
@@ -154,19 +174,19 @@ class DAPORewardScales:
         """
         R5: Overlong Penalty (weight 0.20)
         DAPO specific feature to penalize bloated reasoning traces.
-        If length > 600 characters (~150 tokens), apply progressive negative penalty.
-        Max penalty of -1.0 at 1600 characters.
+        If length > 800 characters, apply progressive negative penalty.
+        Max penalty of -1.0 at 1800 characters.
         """
         rewards = []
         for text in completions:
             length = len(text)
-            if length < 600:
+            if length < 800:
                 rewards.append(0.0)
-            elif length > 1600:
+            elif length > 1800:
                 rewards.append(-1.0)
             else:
                 # Linearly interpolate between 0.0 and -1.0
-                penalty = -((length - 600) / 1000.0)
+                penalty = -((length - 800) / 1000.0)
                 rewards.append(penalty)
         return rewards
         
@@ -198,9 +218,8 @@ class DAPORewardScales:
         r2 = self.compute_r2_outcome_match(decisions, labels)
         
         # R3
-        # Since we removed the Phase 1 RM, we calibrate against ground truth label here as a proxy for 'ideal score'
-        # If label is 1 (SURFACE), score should be high. If label is 0 (FILTER), score should be low.
-        rm_scores_0_1 = [float(lbl) for lbl in labels]
+        # Use actual Phase 1 reward model to calibrate the scores
+        rm_scores_0_1 = self._get_rm_scores(diffs, comments)
         r3 = self.compute_r3_calibration(m_scores, rm_scores_0_1)
         
         # R4

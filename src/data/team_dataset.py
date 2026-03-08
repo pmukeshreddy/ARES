@@ -75,29 +75,25 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str):
         # Real world label (did it get acted on?)
         original_label = data.get("label", 0)
         
-        assigned = False
-        # Very naive assignment based on keyword hit for simulation
-        for team_name, profile in TEAM_PROFILES.items():
-            if any(kw in comment for kw in profile["keywords"]):
-                
-                # If the team cares about this topic AND the original author acted on it, it's a SURFACE
-                # If they care about it, but original didn't act, maybe it's still a SURFACE for this team
-                # For simplicity, we just inherit the ground truth label.
-                
-                prompt = generate_prompt(diff, comment, team_name)
-                
-                team_data[team_name].append({
-                    "prompt": prompt,
-                    "diff": diff,
-                    "comment": comment,
-                    "label": original_label,
-                    "team": team_name
-                })
-                assigned = True
-                break
-                
-        if not assigned:
-            missing_count += 1
+        # 5. Generate team-specific labels
+        # Assign to a random team to balance dataset sizes
+        team_name = random.choice(list(TEAM_PROFILES.keys()))
+        profile = TEAM_PROFILES[team_name]
+        
+        cares = any(kw in comment for kw in profile["keywords"])
+        # If the team cares about this topic, the label inherits the original author's action (1 or 0)
+        # If the team does NOT care about this topic, it is always a FILTER (0)
+        team_label = original_label if cares else 0
+        
+        prompt = generate_prompt(diff, comment, team_name)
+        
+        team_data[team_name].append({
+            "prompt": prompt,
+            "diff": diff,
+            "comment": comment,
+            "label": team_label,
+            "team": team_name
+        })
             
     logger.info(f"Ignored {missing_count} samples that didn't match any team keywords.")
     
