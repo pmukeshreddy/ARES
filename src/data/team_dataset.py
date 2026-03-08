@@ -67,15 +67,23 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
         lines = f.readlines()
         random.shuffle(lines)
         
-    # We only need 250 samples per team (1250 total). Running the RM over 50k takes hours.
-    # Take 2000 samples to be safe and ensure we have enough after filtering.
-    lines = lines[:2000]
-    logger.info(f"Sampled {len(lines)} items for RM scoring.")
+    logger.info(f"Loaded {len(lines)} total items. Beginning RM scoring and dynamic distribution...")
     
-    logger.info("Distributing samples to simulated teams based on thresholds...")
-    missing_count = 0
+    # We need 125 SURFACE and 125 FILTER samples per team (250 total = 50 train / 200 test)
+    TARGET_PER_CLASS = 125
     
     for line in tqdm(lines, desc="Generating Team Labels"):
+        # Check if all teams are fully populated
+        all_full = True
+        for t in TEAM_PROFILES.keys():
+            if len(team_data_surface[t]) < TARGET_PER_CLASS or len(team_data_filter[t]) < TARGET_PER_CLASS:
+                all_full = False
+                break
+                
+        if all_full:
+            logger.info("All team buckets perfectly filled (125 SURFACE / 125 FILTER)! Stopping early.")
+            break
+            
         data = json.loads(line)
         comment = data.get("comment", "").lower()
         diff = data.get("diff_hunk", "")
@@ -97,30 +105,31 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
             # Fallback to original label if RM not provided
             rm_score = float(original_label)
             
-        # 6. Apply Team Threshold
-        # Assign to a random team to balance dataset sizes
-        team_name = random.choice(list(TEAM_PROFILES.keys()))
-        profile = TEAM_PROFILES[team_name]
-        
-        threshold = profile["rm_threshold"]
-        team_label = 1 if rm_score >= threshold else 0
-        
-        prompt = generate_prompt(diff, comment, team_name)
-        
-        sample = {
-            "prompt": prompt,
-            "diff": diff,
-            "comment": comment,
-            "label": team_label,
-            "team": team_name
-        }
-        
-        if team_label == 1:
-            team_data_surface[team_name].append(sample)
-        else:
-            team_data_filter[team_name].append(sample)
+        # 6. Apply Team Thresholds (one RM score powers all teams!)
+        for team_name, profile in TEAM_PROFILES.items():
+            threshold = profile["rm_threshold"]
+            team_label = 1 if rm_score >= threshold else 0
             
-    logger.info(f"Ignored {missing_count} samples that didn't match any team keywords.")
+            # Only generate and store if the bucket still needs it
+            if team_label == 1 and len(team_data_surface[team_name]) < TARGET_PER_CLASS:
+                sample = {
+                    "prompt": generate_prompt(diff, comment, team_name),
+                    "diff": diff,
+                    "comment": comment,
+                    "label": team_label,
+                    "team": team_name
+                }
+                team_data_surface[team_name].append(sample)
+                
+            elif team_label == 0 and len(team_data_filter[team_name]) < TARGET_PER_CLASS:
+                sample = {
+                    "prompt": generate_prompt(diff, comment, team_name),
+                    "diff": diff,
+                    "comment": comment,
+                    "label": team_label,
+                    "team": team_name
+                }
+                team_data_filter[team_name].append(sample)
     
     # Save datasets
     # The requirement is 20-50 train samples, 200+ test samples per team
