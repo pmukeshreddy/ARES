@@ -96,7 +96,7 @@ dapo:
   # Training
   batch_size: 4
   learning_rate: 1.0e-6
-  max_steps: 300
+  max_steps: 50
   
   # GRPO
   group_size: 8
