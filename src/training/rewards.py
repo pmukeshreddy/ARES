@@ -54,53 +54,59 @@ class DAPORewardScales:
         self.device = device
         self.config = config
         
-    def compute_r1_reward_model(self, diffs: list, comments: list) -> list:
+    def compute_r1_reasoning_quality(self, parsed_completions: list, diffs: list, comments: list) -> list:
         """
-        R1: Phase 1 model scores the (diff, comment) pair. Scaled to [-1, 1].
-        Weight: 0.35
+        R1: Reasoning Quality (Rule-based Evaluator).
+        Evaluates the generated <think> trace to prevent reward hacking.
+        Scores based on:
+        1. Length (must have substantive reasoning)
+        2. Groundedness (lexical overlap with diff/comment to prove it's reading the context)
+        3. Non-repetition (penalize looping)
         """
-        if self.rm_model is None:
-            # If RM isn't loaded (e.g. testing), return 0s
-            return [0.0] * len(diffs)
+        rewards = []
+        for p, diff, comment in zip(parsed_completions, diffs, comments):
+            think = p.get("think")
+            if not think:
+                rewards.append(-1.0)
+                continue
+                
+            think_lower = think.lower()
+            diff_comment_lower = (diff + " " + comment).lower()
             
-        rm_scores = []
-        
-        # Batching for Phase 1 model
-        self.rm_model.eval()
-        with torch.no_grad():
-            inputs = []
-            for d, c in zip(diffs, comments):
-                # Truncate diff gently if needed
-                text = f"{d[:2048]} [SEP] {c[:512]}"
-                inputs.append(text)
+            # 1. Length check
+            if len(think) < 50:
+                rewards.append(-0.5)
+                continue
                 
-            # Micro-batching to avoid OOM when evaluating 64 samples at once
-            micro_batch_size = 8
-            for i in range(0, len(inputs), micro_batch_size):
-                batch_inputs = inputs[i:i+micro_batch_size]
+            # 2. Context groundedness (lexical overlap of significant words)
+            import re
+            context_words = set(re.findall(r'\b[a-z]{5,}\b', diff_comment_lower))
+            think_words = set(re.findall(r'\b[a-z]{5,}\b', think_lower))
+            overlap = len(context_words.intersection(think_words))
+            
+            if overlap < 2:
+                # Hallucinated reasoning, doesn't actually discuss the code or comment
+                rewards.append(-0.5)
+                continue
                 
-                tokenized = self.tokenizer(
-                    batch_inputs,
-                    padding=True,
-                    truncation=True,
-                    max_length=1024,
-                    return_tensors="pt"
-                ).to(self.device)
+            # 3. Repetition check (unique words / total words)
+            words = think_lower.split()
+            if len(set(words)) / max(1, len(words)) < 0.4:
+                # Highly repetitive loop
+                rewards.append(-1.0)
+                continue
                 
-                # The Phase 1 model outputs logits
-                logits = self.rm_model(tokenized.input_ids, tokenized.attention_mask).squeeze(-1)
-                
-                # Handle scalar case if batch size is 1
-                if logits.dim() == 0:
-                    logits = logits.unsqueeze(0)
-                    
-                probs = torch.sigmoid(logits).cpu().tolist()
-                
-                # Scale [0, 1] to [-1, 1]
-                batch_scores = [(p * 2.0) - 1.0 for p in probs]
-                rm_scores.extend(batch_scores)
-                
-        return rm_scores
+            # Continuous reward based on groundedness (capped at 10 overlapping significant words)
+            overlap_score = min(1.0, overlap / 10.0)
+            
+            # Continuous reward based on length (sweet spot up to 500 chars)
+            len_score = min(1.0, len(think) / 500.0)
+            
+            # Final R1 score is a blend of groundedness and sufficient length
+            r = (overlap_score * 0.7) + (len_score * 0.3)
+            rewards.append(r)
+            
+        return rewards
 
     def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list) -> list:
         """
@@ -184,15 +190,17 @@ class DAPORewardScales:
         m_scores = [p["score"] for p in parsed]
         format_scores = [p["format_score"] for p in parsed]
         
-        # R1 (RM scaled -1 to 1) 
-        # For R3, we need the 0 to 1 version, so we convert back
-        r1_scaled = self.compute_r1_reward_model(diffs, comments)
-        rm_scores_0_1 = [(s + 1.0) / 2.0 for s in r1_scaled]
+        # R1: Rule-based reasoning quality
+        # Evaluates the <think> trace directly for overlap, coherence, and length
+        r1_scaled = self.compute_r1_reasoning_quality(parsed, diffs, comments)
         
         # R2
         r2 = self.compute_r2_outcome_match(decisions, labels)
         
         # R3
+        # Since we removed the Phase 1 RM, we calibrate against ground truth label here as a proxy for 'ideal score'
+        # If label is 1 (SURFACE), score should be high. If label is 0 (FILTER), score should be low.
+        rm_scores_0_1 = [float(lbl) for lbl in labels]
         r3 = self.compute_r3_calibration(m_scores, rm_scores_0_1)
         
         # R4
@@ -205,14 +213,14 @@ class DAPORewardScales:
         total_rewards = []
         for i in range(batch_size):
             if config is not None:
-                w_r1 = config.get("r1_weight", 0.00)
-                w_r2 = config.get("r2_weight", 0.45)
-                w_r3 = config.get("r3_weight", 0.20)
+                w_r1 = config.get("r1_weight", 0.20)
+                w_r2 = config.get("r2_weight", 0.35)
+                w_r3 = config.get("r3_weight", 0.15)
                 w_r4 = config.get("r4_weight", 0.15)
-                w_r5 = config.get("r5_weight", 0.20)
+                w_r5 = config.get("r5_weight", 0.15)
             else:
                 # Fallback weights
-                w_r1, w_r2, w_r3, w_r4, w_r5 = 0.00, 0.45, 0.20, 0.15, 0.20
+                w_r1, w_r2, w_r3, w_r4, w_r5 = 0.20, 0.35, 0.15, 0.15, 0.15
             
             total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
