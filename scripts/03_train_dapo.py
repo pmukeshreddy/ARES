@@ -106,33 +106,33 @@ def main():
     logger.info("RLCR v2: PHASE 2 DAPO PER-TEAM TRAINING")
     logger.info("=" * 60)
     
-    # 1. Ensure Data Exists
-    teams_dir = Path(PROJECT_ROOT) / "data" / "teams"
-    if not teams_dir.exists() or len(list(teams_dir.glob("*"))) == 0:
-        logger.info("Simulated team data not found, generating now...")
-        processed_dir = Path(PROJECT_ROOT) / config["data"]["processed_dir"]
-        base_data = processed_dir / "train.jsonl"
-        # Use small if available, else primary
-        if (processed_dir / "train_small.jsonl").exists():
-            base_data = processed_dir / "train_small.jsonl"
-            
-        simulate_team_datasets(str(base_data), str(teams_dir))
-        
-    teams = [d.name for d in teams_dir.iterdir() if d.is_dir()]
-    logger.info(f"Discovered {len(teams)} teams: {', '.join(teams)}")
-    
-    # 2. Load Phase 1 Reward Model (Frozen)
+    # 1. Load Phase 1 Reward Model (Frozen) - Needed for dataset generation
     rm_path = Path(PROJECT_ROOT) / config["reward_model"]["output_dir"] / "best"
     if not rm_path.exists():
         logger.error(f"Phase 1 Reward Model checkpoint not found at {rm_path}")
         logger.error("Run 'python scripts/01_train_reward.py' first!")
         sys.exit(1)
         
-    logger.info("Loading Phase 1 Reward Model for R1 / R3 computation...")
+    logger.info("Loading Phase 1 Reward Model...")
     # Load base model from HF, adapters from local
     rm_model = RewardModel.load_checkpoint(str(rm_path), config)
     rm_model = rm_model.to("cuda")
     rm_model.eval()
+    
+    # 2. Ensure Data Exists
+    teams_dir = Path(PROJECT_ROOT) / "data" / "teams"
+    if not teams_dir.exists() or len(list(teams_dir.glob("*"))) == 0:
+        logger.info("Simulated team data not found, generating now using Reward Model for labels...")
+        processed_dir = Path(PROJECT_ROOT) / config["data"]["processed_dir"]
+        base_data = processed_dir / "train.jsonl"
+        # Use small if available, else primary
+        if (processed_dir / "train_small.jsonl").exists():
+            base_data = processed_dir / "train_small.jsonl"
+            
+        simulate_team_datasets(str(base_data), str(teams_dir), rm_model=rm_model, rm_tokenizer=rm_model.tokenizer)
+        
+    teams = [d.name for d in teams_dir.iterdir() if d.is_dir()]
+    logger.info(f"Discovered {len(teams)} teams: {', '.join(teams)}")
     
     # 3. Initialize Trainer (creates base model)
     logger.info("Initializing DAPO trainer base model and LoRA adapter...")

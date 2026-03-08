@@ -8,25 +8,25 @@ logger = logging.getLogger(__name__)
 
 # 5 Simulated Teams
 TEAM_PROFILES = {
+    "Pragmatic-Shippers": {
+        "context": "We are an early-stage startup team. We only care about catastrophic bugs, logic errors that break the app, or complete architectural failures. We ignore everything else to ship faster.",
+        "rm_threshold": 0.85  # Only surface extremely actionable/critical items
+    },
+    "Thorough-Mentors": {
+        "context": "We are an open-source maintainer team. We care about teaching. We surface all suggestions, alternative approaches, design patterns, and edge cases.",
+        "rm_threshold": 0.30  # Surface almost everything that has any utility
+    },
     "Security-First": {
         "context": "We are a high-security backend team. We care deeply about vulnerabilities, SQL injection, buffer overflows, and input validation. We ignore style nits.",
-        "keywords": ["security", "vulnerability", "sql", "inject", "auth", "validation", "buffer", "overflow", "leak", "secret", "password", "token", "crypto", "safe", "exploit"]
+        "rm_threshold": 0.70  # High bar, but not as extreme as pragmatic
     },
     "Performance-Obsessed": {
         "context": "We are a low-latency trading systems team. We care about O(N) complexity, memory allocations, caching, and CPU cycles. We ignore minor refactoring unless it speeds up code.",
-        "keywords": ["performance", "speed", "latency", "memory", "allocation", "cache", "o(n)", "complexity", "slow", "fast", "optimize", "loop", "bottleneck", "thread"]
+        "rm_threshold": 0.65
     },
     "Style-Sticklers": {
         "context": "We are a frontend foundational UI team. Consistency is god. We care about naming conventions, strict typing, linting rules, formatting, and documentation.",
-        "keywords": ["style", "format", "name", "camelcase", "lint", "type", "docstring", "comment", "document", "readability", "pep8", "consistent", "convention", "clear"]
-    },
-    "Pragmatic-Shippers": {
-        "context": "We are an early-stage startup team. We only care about catastrophic bugs, logic errors that break the app, or complete architectural failures. We ignore everything else to ship faster.",
-        "keywords": ["bug", "error", "crash", "break", "fail", "null", "exception", "undefined", "logic", "wrong", "fix", "issue"]
-    },
-    "Thorough-Mentors": {
-        "context": "We are an open-source maintainer team. We care about teaching. We surface surface all suggestions, alternative approaches, design patterns, and edge cases.",
-        "keywords": ["suggest", "alternative", "pattern", "design", "edge case", "corner case", "better", "refactor", "abstract", "extract", "cleaner", "solid", "dry"]
+        "rm_threshold": 0.50  # Average bar
     }
 }
 
@@ -47,10 +47,11 @@ def generate_prompt(diff: str, comment: str, team_name: str) -> str:
     return prompt
 
 
-def simulate_team_datasets(hf_dataset_path: str, output_dir: str):
+def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None, rm_tokenizer=None):
     """
-    Reads the processed HF dataset and distributes samples into 5 team buckets
-    based on keyword matching to simulate different team preferences.
+    Reads the processed HF dataset and distributes samples into 5 team buckets.
+    Uses the Phase 1 Reward Model (F1=0.99) to score each comment's actionability,
+    then applies team-specific thresholds to generate high-quality ground truth labels.
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -76,15 +77,28 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str):
         # Real world label (did it get acted on?)
         original_label = data.get("label", 0)
         
-        # 5. Generate team-specific labels
+        # 5. Generate Phase 1 RM Score
+        rm_score = 0.0
+        if rm_model is not None and rm_tokenizer is not None:
+            import torch
+            diff_text = diff[:2048]
+            comment_text = comment[:512]
+            prompt_text = f"{diff_text} [SEP] {comment_text}"
+            inputs = rm_tokenizer(prompt_text, truncation=True, max_length=1024, return_tensors="pt").to(rm_model.backbone.device)
+            with torch.no_grad():
+                output = rm_model(inputs["input_ids"], inputs["attention_mask"])
+                rm_score = torch.sigmoid(output).item()
+        else:
+            # Fallback to original label if RM not provided
+            rm_score = float(original_label)
+            
+        # 6. Apply Team Threshold
         # Assign to a random team to balance dataset sizes
         team_name = random.choice(list(TEAM_PROFILES.keys()))
         profile = TEAM_PROFILES[team_name]
         
-        cares = any(kw in comment for kw in profile["keywords"])
-        # If the team cares about this topic, the label inherits the original author's action (1 or 0)
-        # If the team does NOT care about this topic, it is always a FILTER (0)
-        team_label = original_label if cares else 0
+        threshold = profile["rm_threshold"]
+        team_label = 1 if rm_score >= threshold else 0
         
         prompt = generate_prompt(diff, comment, team_name)
         
