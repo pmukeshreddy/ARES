@@ -59,30 +59,36 @@ class SGLangBridge:
             payload = {
                 "text": formatted_prompt,
                 "sampling_params": {
-                    "temperature": 1.0,
+                    "temperature": 1.0, # High temp to encourage exploration
                     "top_p": 0.95,
+                    "n": n,             # Natively sample N diverse completions!
                     "max_new_tokens": max_tokens
                 },
                 "lora_path": lora_path
             }
             
-            prompt_completions = []
-            for i in range(n):
-                try:
-                    resp = requests.post(url, json=payload).json()
+            try:
+                resp = requests.post(url, json=payload).json()
+                
+                # In native SGLang, passing n=16 returns 'text' as a list of strings
+                completions = resp.get("text", [])
+                
+                if not isinstance(completions, list):
+                    completions = [completions]
                     
-                    if i == 0:
-                        logger.info(f"SGLang raw response keys: {list(resp.keys())}, snippet: {str(resp)[:300]}")
-                        
-                    completion = resp.get("text", "")
-                    if isinstance(completion, list):
-                        completion = completion[0] if len(completion) > 0 else ""
-                    prompt_completions.append(completion)
-                except Exception as e:
-                    logger.error(f"SGLang generation failed: {e}")
-                    prompt_completions.append("")
+                # Pad with empty strings if it failed to return exactly N
+                while len(completions) < n:
+                    completions.append("")
+                
+                # Just log the first prompt's first completion for debugging
+                if len(results) == 0:
+                    logger.info(f"SGLang raw response keys: {list(resp.keys())}, snippet: {str(resp)[:300]}")
                     
-            results.append(prompt_completions)
+                results.append(completions[:n])
+                
+            except Exception as e:
+                logger.error(f"SGLang generation failed: {e}")
+                results.append([""] * n)
                 
         return results
 
