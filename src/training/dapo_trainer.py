@@ -277,13 +277,20 @@ class DAPOTrainer:
                 adv_r3 = w_r3 * normalize_within_group(r3_tensor)
                 adv_r4 = w_r4 * normalize_within_group(r4_tensor)
                 adv_r5 = w_r5 * normalize_within_group(r5_tensor)
-                adv_r6 = normalize_within_group(r6_tensor)  # No weight — already scaled
                 
-                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5 + adv_r6
+                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
                 
-                # Check if any group has meaningful variance (at least one component varies)
+                # Check if any group has meaningful variance AND decision diversity
                 total_std = advantages.std(dim=1)
                 valid_groups = (total_std > 0.01)
+                
+                # Also skip groups where ALL completions chose the same decision
+                # (these contribute zero decision-learning signal regardless of rewards)
+                for g_idx in range(r2_tensor.size(0)):
+                    group_r2 = r2_tensor[g_idx]  # R2 varies only if decisions differ
+                    if group_r2.std() < 0.01:  # All same decision
+                        valid_groups[g_idx] = False
+                
                 if valid_groups.sum() == 0:
                     continue  # No learning signal this batch
                 
@@ -351,6 +358,11 @@ class DAPOTrainer:
                     mb_loss = 0.0
                     mb_valid_tokens = 0
                     kl_penalty_weight = self.config.get("kl_penalty", 0.10)
+                    entropy_bonus_weight = self.config.get("entropy_bonus", 0.03)
+                    
+                    # Get full logits for entropy computation
+                    outputs = self.model(inputs.input_ids, attention_mask=inputs.attention_mask)
+                    logits = outputs.logits[:, :-1, :]  # shift for next-token prediction
                     
                     for idx in range(len(mb_adv)):
                         start_idx = prompt_lens[idx]
@@ -368,7 +380,6 @@ class DAPOTrainer:
                         surr1 = ratio * adv
                         
                         # DAPO Asymmetric Decoupled Clipping
-                        # adv > 0 gets upper clipped. adv < 0 gets lower clipped.
                         ratio_clipped = torch.where(
                             adv > 0,
                             torch.clamp(ratio, max=1.0 + self.clip_ratio_high),
@@ -376,11 +387,19 @@ class DAPOTrainer:
                         )
                         surr2 = ratio_clipped * adv
                         
-                        # KL divergence estimator to prevent unbounded drift from base model
+                        # KL divergence estimator
                         kl = torch.exp(ref_logp - curr_logp) - (ref_logp - curr_logp) - 1.0
                         
-                        # Token-level GRPO loss + KL Penalty
-                        token_loss = -torch.min(surr1, surr2).mean() + kl_penalty_weight * kl.mean()
+                        # Token-level entropy of the policy's distribution
+                        # H(π) = -Σ p(token) * log(p(token)) at each generated position
+                        gen_logits = logits[idx, start_idx:end_idx, :]
+                        gen_probs = F.softmax(gen_logits, dim=-1)
+                        gen_log_probs = F.log_softmax(gen_logits, dim=-1)
+                        token_entropy = -(gen_probs * gen_log_probs).sum(dim=-1)  # H per position
+                        
+                        # Loss = -min(surr1, surr2) + kl_weight*KL - β*H(π)
+                        # Subtracting entropy bonus ENCOURAGES higher entropy (more exploration)
+                        token_loss = -torch.min(surr1, surr2).mean() + kl_penalty_weight * kl.mean() - entropy_bonus_weight * token_entropy.mean()
                         mb_loss += token_loss
                         mb_valid_tokens += 1
                     

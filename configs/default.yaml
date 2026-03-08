@@ -104,6 +104,7 @@ dapo:
   dynamic_sampling: true
   token_level_loss: true
   kl_penalty: 0.10
+  entropy_bonus: 0.03    # Token-level entropy bonus to prevent policy collapse
   max_new_tokens: 256
   
   # Reward Weights
