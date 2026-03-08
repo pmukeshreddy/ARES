@@ -23,6 +23,9 @@ from tqdm import tqdm
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+from src.training.reward_model import RewardModel
+from src.data.team_dataset import simulate_team_datasets
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -126,6 +129,31 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # 1. Ensure Data Exists
+    if not teams_dir.exists() or len(list(teams_dir.glob("*"))) == 0:
+        logger.info("Simulated team data not found, generating now using Reward Model for labels...")
+        
+        # Load RM
+        rm_path = Path("checkpoints/reward_model/best")
+        if not rm_path.exists():
+            logger.error(f"Phase 1 RM checkpoint not found at {rm_path}")
+            sys.exit(1)
+            
+        rm_model = RewardModel.load_checkpoint(str(rm_path), config)
+        rm_model = rm_model.to(device)
+        rm_model.eval()
+        
+        processed_dir = Path(config["data"]["processed_dir"])
+        base_data = processed_dir / "train.jsonl"
+        if (processed_dir / "train_small.jsonl").exists():
+            base_data = processed_dir / "train_small.jsonl"
+            
+        simulate_team_datasets(str(base_data), str(teams_dir), rm_model=rm_model, rm_tokenizer=rm_model.tokenizer)
+        
+        # Free RM from memory to save VRAM for SFT
+        del rm_model
+        torch.cuda.empty_cache()
     
     # Load model & tokenizer ONCE
     logger.info(f"Loading base model: {model_name}")
