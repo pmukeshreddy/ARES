@@ -133,9 +133,9 @@ class DAPORewardScales:
         rewards = []
         for dec, label in zip(decisions, ground_truth_labels):
             if dec == "SURFACE":
-                r = 1.0 if label == 1 else -1.2
+                r = 1.0 if label == 1 else -1.0
             elif dec == "FILTER":
-                r = 1.0 if label == 0 else -0.8
+                r = 1.0 if label == 0 else -1.0
             else:
                 r = -1.0 # Invalid decision
             rewards.append(r)
