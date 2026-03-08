@@ -70,13 +70,9 @@ try:
     with open("configs/default.yaml") as f:
         config = yaml.safe_load(f)
     
-    rm_config = config["reward_model"]
-    from transformers import AutoTokenizer
-    rm_tokenizer = AutoTokenizer.from_pretrained(rm_config["model_name"], trust_remote_code=True)
-    if rm_tokenizer.pad_token is None:
-        rm_tokenizer.pad_token = rm_tokenizer.eos_token
+    rm_model = RewardModel.from_config(config)
+    rm_tokenizer = rm_model.tokenizer
     
-    rm_model = RewardModel(rm_config)
     checkpoint_path = Path("checkpoints/reward_model/best")
     if checkpoint_path.exists():
         rm_model.load(str(checkpoint_path))
