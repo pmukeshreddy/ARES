@@ -108,7 +108,7 @@ dapo:
   
   # Reward Weights
   r1_weight: 0.20      # Reasoning quality
-  r2_weight: 0.35      # Outcome match
-  r3_weight: 0.15      # Calibration
+  r2_weight: 0.40      # Outcome match (primary learning signal)
+  r3_weight: 0.05      # Calibration (reduced to prevent bias)
   r4_weight: 0.15      # Format compliance
-  r5_weight: 0.15      # Overlong penalty
+  r5_weight: 0.20      # Overlong penalty

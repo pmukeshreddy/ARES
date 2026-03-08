@@ -57,11 +57,8 @@ class DAPORewardScales:
     def compute_r1_reasoning_quality(self, parsed_completions: list, diffs: list, comments: list, prompts: list) -> list:
         """
         R1: Reasoning Quality (Rule-based Evaluator).
-        Evaluates the generated <think> trace to prevent reward hacking.
-        Scores based on:
-        1. Length (must have substantive reasoning)
-        2. Groundedness (lexical overlap with diff/comment to prove it's reading the context)
-        3. Non-repetition (penalize looping)
+        Decision-aware: relaxes groundedness for SURFACE (focuses on 'why it matters')
+        vs FILTER (which should reference the diff to justify ignoring).
         """
         rewards = []
         for p, diff, comment, prompt in zip(parsed_completions, diffs, comments, prompts):
@@ -93,12 +90,19 @@ class DAPORewardScales:
                     continue
                 
             # 3. Context groundedness (must overlap with DIFF specifically)
+            # Decision-aware: SURFACE reasoning focuses on 'why it matters' and may not
+            # quote the diff verbatim, so we use a lower threshold
             import re
             diff_words = set(re.findall(r'\b[a-z]{5,}\b', diff.lower()[:1500])) # Truncated diff
+            comment_words = set(re.findall(r'\b[a-z]{5,}\b', comment.lower()))
+            context_words = diff_words | comment_words  # Allow overlap with either diff OR comment
             think_words = set(re.findall(r'\b[a-z]{5,}\b', think_lower))
-            overlap_diff = len(diff_words.intersection(think_words))
+            overlap_context = len(context_words.intersection(think_words))
             
-            if overlap_diff < 3:
+            decision = p.get("decision")
+            min_overlap = 1 if decision == "SURFACE" else 3
+            
+            if overlap_context < min_overlap:
                 # Hallucinated reasoning, doesn't actually discuss the code
                 rewards.append(-0.5)
                 continue
@@ -111,7 +115,7 @@ class DAPORewardScales:
                 continue
                 
             # Continuous reward based on groundedness (capped at 10 overlapping significant words)
-            overlap_score = min(1.0, overlap_diff / 10.0)
+            overlap_score = min(1.0, overlap_context / 10.0)
             
             # Continuous reward based on length (sweet spot up to 150 chars, R5 penalizes > 400)
             len_score = min(1.0, len(think) / 150.0)
@@ -161,17 +165,18 @@ class DAPORewardScales:
                 rm_scores.extend(probs)
         return rm_scores
 
-    def compute_r3_calibration(self, model_scores: list, rm_scores_0_1: list) -> list:
+    def compute_r3_calibration(self, model_scores: list, ground_truth_labels: list) -> list:
         """
-        R3: Calibration (weight 0.15)
-        |model_score - reward_model_score| < 0.2 → +1.0
-        else → -1.0
+        R3: Calibration (weight 0.05)
+        Compares model's <score> against the ground truth label (0 or 1).
+        This avoids the bias from the reward model's naturally low outputs.
         """
         rewards = []
-        for m_score, rm_score in zip(model_scores, rm_scores_0_1):
-            if m_score is not None and rm_score is not None:
-                diff = abs(m_score - rm_score)
-                r = 1.0 - (2.0 * diff)
+        for m_score, label in zip(model_scores, ground_truth_labels):
+            if m_score is not None:
+                target = float(label)  # 0.0 or 1.0
+                diff = abs(m_score - target)
+                r = 1.0 - (2.0 * diff)  # Perfect match = +1.0, max error = -1.0
             else:
                 r = -1.0
             rewards.append(r)
@@ -231,9 +236,8 @@ class DAPORewardScales:
         # R2
         r2 = self.compute_r2_outcome_match(decisions, labels)
         
-        # R3
-        rm_scores_0_1 = self._get_rm_scores(diffs, comments)
-        r3 = self.compute_r3_calibration(m_scores, rm_scores_0_1)
+        # R3: Calibration against ground truth labels (not reward model)
+        r3 = self.compute_r3_calibration(m_scores, labels)
         
         # R4
         r4 = self.compute_r4_format(format_scores)
