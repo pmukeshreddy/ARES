@@ -3,6 +3,7 @@ import random
 from pathlib import Path
 from typing import Dict, List
 import logging
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -63,14 +64,18 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
     logger.info(f"Loading base dataset from {hf_dataset_path}")
     # Load dataset
     with open(hf_dataset_path, "r") as f:
-        # We only need string manipulation, load up to 50k to be fast
         lines = f.readlines()
         random.shuffle(lines)
+        
+    # We only need 250 samples per team (1250 total). Running the RM over 50k takes hours.
+    # Take 2000 samples to be safe and ensure we have enough after filtering.
+    lines = lines[:2000]
+    logger.info(f"Sampled {len(lines)} items for RM scoring.")
     
-    logger.info("Distributing samples to simulated teams based on keywords...")
+    logger.info("Distributing samples to simulated teams based on thresholds...")
     missing_count = 0
     
-    for line in lines:
+    for line in tqdm(lines, desc="Generating Team Labels"):
         data = json.loads(line)
         comment = data.get("comment", "").lower()
         diff = data.get("diff_hunk", "")
