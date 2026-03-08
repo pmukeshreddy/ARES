@@ -25,10 +25,12 @@ class SGLangBridge:
 
     def load_lora(self, lora_name: str, lora_path: str):
         """Dynamically load/reload a LoRA adapter into SGLang."""
+        logger.info(f"Loading LoRA '{lora_name}' from path: {lora_path}")
         resp = requests.post(f"{self.base_url}/load_lora_adapter", json={
             "lora_name": lora_name,
             "lora_path": lora_path,
         })
+        logger.info(f"LoRA load response [{resp.status_code}]: {resp.text[:300]}")
         if resp.status_code != 200:
             logger.error(f"Failed to load LoRA: {resp.text}")
         return resp.json()
@@ -68,6 +70,8 @@ class SGLangBridge:
             }
             
             try:
+                if len(results) == 0:
+                    logger.info(f"SGLang generate using lora_path='{lora_path}'")
                 resp = requests.post(url, json=payload).json()
                 
                 # Handle both old and new SGLang response formats:
