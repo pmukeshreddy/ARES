@@ -31,9 +31,14 @@ TEAM_PROFILES = {
     }
 }
 
+# Reverse map: snake_case folder name -> original TEAM_PROFILES key
+_TEAM_NAME_LOOKUP = {k.lower().replace("-", "_"): k for k in TEAM_PROFILES}
+
 def generate_prompt(diff: str, comment: str, team_name: str) -> str:
     """Formats the input prompt for the DAPO Qwen2.5-Coder-3B-Instruct model."""
-    context = TEAM_PROFILES[team_name]["context"]
+    # Resolve snake_case folder names (e.g. "pragmatic_shippers") to profile keys ("Pragmatic-Shippers")
+    canonical = _TEAM_NAME_LOOKUP.get(team_name, team_name)
+    context = TEAM_PROFILES[canonical]["context"]
     
     prompt = (
         f"You are an AI code reviewer acting as a filter for a specific engineering team.\n\n"
