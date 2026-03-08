@@ -66,7 +66,7 @@ def create_sft_example(item: dict, tokenizer) -> str:
     return prompt_text, ideal_completion
 
 
-def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 3, lr: float = 2e-5):
+def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 1, lr: float = 5e-6):
     """Runs SFT warm-up for a single team using a subset of the unlabeled data."""
     logger.info(f"\n{'='*50}\nSFT Warm-Up for team: {team_name}\n{'='*50}")
     
