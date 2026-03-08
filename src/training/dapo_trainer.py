@@ -59,7 +59,7 @@ class SGLangBridge:
             payload = {
                 "text": formatted_prompt,
                 "sampling_params": {
-                    "temperature": 0.8,
+                    "temperature": 1.0,
                     "top_p": 0.95,
                     "max_new_tokens": max_tokens
                     # "n" is ignored by sglang /generate, we loop manually
@@ -158,10 +158,23 @@ class DAPOTrainer:
         """Trains the DAPO model for a single team."""
         logger.info(f"\n{'='*50}\nStarting DAPO training for team: {team_name}\n{'='*50}")
         
-        # Re-initialize specific LoRA for this team (reset weights)
-        for name, param in self.model.named_parameters():
-            if "lora" in name:
-                torch.nn.init.normal_(param, std=0.01)
+        # Load SFT warm-up weights if available, otherwise random init
+        sft_warmup_path = Path("checkpoints/sft_warmup") / f"sft_warmup_{team_name}"
+        if sft_warmup_path.exists():
+            logger.info(f"Loading SFT warm-up weights from {sft_warmup_path}")
+            # Load adapter weights from the SFT checkpoint
+            import safetensors.torch
+            sft_state = safetensors.torch.load_file(str(sft_warmup_path / "adapter_model.safetensors"))
+            model_state = self.model.state_dict()
+            for key in sft_state:
+                if key in model_state:
+                    model_state[key].copy_(sft_state[key])
+            logger.info(f"SFT warm-up weights loaded for {team_name}")
+        else:
+            logger.info(f"No SFT warm-up found at {sft_warmup_path}, using random LoRA init")
+            for name, param in self.model.named_parameters():
+                if "lora" in name:
+                    torch.nn.init.normal_(param, std=0.01)
                 
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config["learning_rate"])
         
@@ -228,20 +241,36 @@ class DAPOTrainer:
                     flat_completions, flat_diffs, flat_comments, flat_labels, self.config, flat_prompts
                 )
                 
-                # Format rewards into groups and calculate Advantage
-                rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
-                rewards_grouped = rewards_tensor.view(-1, oversample_size)
+                # GDPO: Per-Reward Normalization (normalize each R1-R5 independently within each group)
+                # Then sum the normalized advantages. This prevents reward signal collapse.
+                w_r1, w_r2, w_r3, w_r4, w_r5 = logs["weights"]
                 
-                # A_i = (R_i - mean(R)) / (std(R) + eps)
-                mean_grouped = rewards_grouped.mean(dim=1, keepdim=True)
-                std_grouped = rewards_grouped.std(dim=1, keepdim=True)
+                r1_tensor = torch.tensor(logs["r1_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r2_tensor = torch.tensor(logs["r2_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r3_tensor = torch.tensor(logs["r3_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r4_tensor = torch.tensor(logs["r4_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
-                # If no variance in group, skip it entirely
-                valid_groups = (std_grouped.squeeze(-1) > 0.01)
+                def normalize_within_group(t):
+                    """Normalize each row (group) independently: (x - mean) / (std + eps)"""
+                    m = t.mean(dim=1, keepdim=True)
+                    s = t.std(dim=1, keepdim=True)
+                    return (t - m) / (s + 1e-8)
+                
+                # Normalize each reward component independently, then weight and sum
+                adv_r1 = w_r1 * normalize_within_group(r1_tensor)
+                adv_r2 = w_r2 * normalize_within_group(r2_tensor)
+                adv_r3 = w_r3 * normalize_within_group(r3_tensor)
+                adv_r4 = w_r4 * normalize_within_group(r4_tensor)
+                adv_r5 = w_r5 * normalize_within_group(r5_tensor)
+                
+                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
+                
+                # Check if any group has meaningful variance (at least one component varies)
+                total_std = advantages.std(dim=1)
+                valid_groups = (total_std > 0.01)
                 if valid_groups.sum() == 0:
                     continue  # No learning signal this batch
-                    
-                advantages = (rewards_grouped - mean_grouped) / (std_grouped + 1e-8)
                 
                 # 4. Dynamic Resampling: Keep only top 25% and bottom 25% of advantages
                 keep_per_group = self.group_size # e.g. 8

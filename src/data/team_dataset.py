@@ -123,9 +123,9 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str):
         # Shuffle matched dataset
         random.shuffle(samples)
         
-        # Take 50 for train, 200 for test (or whatever is available)
-        train_samples = samples[:50]
-        test_samples = samples[50:250] if len(samples) >= 250 else samples[50:]
+        # Take 150 for train, 200 for test (or whatever is available)
+        train_samples = samples[:150]
+        test_samples = samples[150:350] if len(samples) >= 350 else samples[150:]
         
         team_dir = out_dir / team_name.lower().replace("-", "_")
         team_dir.mkdir(exist_ok=True)

@@ -94,7 +94,7 @@ dapo:
   
   # Training
   batch_size: 4
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-6
   num_epochs: 1
   
   # GRPO

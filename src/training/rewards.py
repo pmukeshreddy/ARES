@@ -213,7 +213,7 @@ class DAPORewardScales:
                              prompts: list = None) -> dict:
         """
         Computes total reward for a batch of completions.
-        Returns total_rewards list and a dict of component averages for logging.
+        Returns total_rewards list, per-component reward lists, and a dict of component averages for logging.
         """
         batch_size = len(completions)
         
@@ -226,14 +226,12 @@ class DAPORewardScales:
         format_scores = [p["format_score"] for p in parsed]
         
         # R1: Rule-based reasoning quality
-        # Evaluates the <think> trace directly for overlap, coherence, and length
         r1_scaled = self.compute_r1_reasoning_quality(parsed, diffs, comments, prompts)
         
         # R2
         r2 = self.compute_r2_outcome_match(decisions, labels)
         
         # R3
-        # Use actual Phase 1 reward model to calibrate the scores
         rm_scores_0_1 = self._get_rm_scores(diffs, comments)
         r3 = self.compute_r3_calibration(m_scores, rm_scores_0_1)
         
@@ -243,19 +241,19 @@ class DAPORewardScales:
         # R5 (DAPO Overlong Penalty)
         r5 = self.compute_r5_overlong_penalty(completions)
         
-        # Total
+        # Get weights
+        if config is not None:
+            w_r1 = config.get("r1_weight", 0.20)
+            w_r2 = config.get("r2_weight", 0.35)
+            w_r3 = config.get("r3_weight", 0.15)
+            w_r4 = config.get("r4_weight", 0.15)
+            w_r5 = config.get("r5_weight", 0.15)
+        else:
+            w_r1, w_r2, w_r3, w_r4, w_r5 = 0.20, 0.35, 0.15, 0.15, 0.15
+        
+        # Total (weighted sum, used for logging only; GDPO normalizes per-component in trainer)
         total_rewards = []
         for i in range(batch_size):
-            if config is not None:
-                w_r1 = config.get("r1_weight", 0.20)
-                w_r2 = config.get("r2_weight", 0.35)
-                w_r3 = config.get("r3_weight", 0.15)
-                w_r4 = config.get("r4_weight", 0.15)
-                w_r5 = config.get("r5_weight", 0.15)
-            else:
-                # Fallback weights
-                w_r1, w_r2, w_r3, w_r4, w_r5 = 0.20, 0.35, 0.15, 0.15, 0.15
-            
             total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
             
@@ -282,7 +280,14 @@ class DAPORewardScales:
             "r4": sum(r4) / batch_size,
             "r5_penalty": sum(r5) / batch_size,
             "total_reward": sum(total_rewards) / batch_size,
-            "valid_format_ratio": sum(1 for p in format_scores if p == 1.0) / batch_size
+            "valid_format_ratio": sum(1 for p in format_scores if p == 1.0) / batch_size,
+            # Per-component raw lists for GDPO normalization in trainer
+            "r1_raw": r1_scaled,
+            "r2_raw": r2,
+            "r3_raw": r3,
+            "r4_raw": r4,
+            "r5_raw": r5,
+            "weights": [w_r1, w_r2, w_r3, w_r4, w_r5],
         }
         
         return total_rewards, logs
