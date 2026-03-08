@@ -54,7 +54,7 @@ class DAPORewardScales:
         self.device = device
         self.config = config
         
-    def compute_r1_reasoning_quality(self, parsed_completions: list, diffs: list, comments: list) -> list:
+    def compute_r1_reasoning_quality(self, parsed_completions: list, diffs: list, comments: list, prompts: list) -> list:
         """
         R1: Reasoning Quality (Rule-based Evaluator).
         Evaluates the generated <think> trace to prevent reward hacking.
@@ -64,27 +64,41 @@ class DAPORewardScales:
         3. Non-repetition (penalize looping)
         """
         rewards = []
-        for p, diff, comment in zip(parsed_completions, diffs, comments):
+        for p, diff, comment, prompt in zip(parsed_completions, diffs, comments, prompts):
             think = p.get("think")
             if not think:
                 rewards.append(-1.0)
                 continue
                 
             think_lower = think.lower()
-            diff_comment_lower = (diff + " " + comment).lower()
+            prompt_lower = prompt.lower()
             
             # 1. Length check
             if len(think) < 50:
                 rewards.append(-0.5)
                 continue
                 
-            # 2. Context groundedness (must overlap with DIFF specifically)
+            # 2. Prompt Parroting Check (Bigram overlap)
+            def get_bigrams(text):
+                words = text.split()
+                return set(zip(words[:-1], words[1:]))
+                
+            think_bigrams = get_bigrams(think_lower)
+            prompt_bigrams = get_bigrams(prompt_lower)
+            if len(think_bigrams) > 0:
+                parroting_ratio = len(think_bigrams.intersection(prompt_bigrams)) / len(think_bigrams)
+                if parroting_ratio > 0.6:
+                    # Echoing the system prompt instead of reasoning
+                    rewards.append(-1.0)
+                    continue
+                
+            # 3. Context groundedness (must overlap with DIFF specifically)
             import re
             diff_words = set(re.findall(r'\b[a-z]{5,}\b', diff.lower()[:1500])) # Truncated diff
             think_words = set(re.findall(r'\b[a-z]{5,}\b', think_lower))
             overlap_diff = len(diff_words.intersection(think_words))
             
-            if overlap_diff < 4:
+            if overlap_diff < 6:
                 # Hallucinated reasoning, doesn't actually discuss the code
                 rewards.append(-0.5)
                 continue
@@ -141,8 +155,8 @@ class DAPORewardScales:
                 b_comments = comments[i:i+rm_batch_size]
                 prompts = [f"{d[:2048]} [SEP] {c[:512]}" for d, c in zip(b_diffs, b_comments)]
                 inputs = self.tokenizer(prompts, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(self.device)
-                outputs = self.rm_model(**inputs)
-                probs = torch.sigmoid(outputs.logits).squeeze(-1).cpu().tolist()
+                outputs = self.rm_model(inputs["input_ids"], inputs["attention_mask"])
+                probs = torch.sigmoid(outputs).squeeze(-1).cpu().tolist()
                 if not isinstance(probs, list): probs = [probs]
                 rm_scores.extend(probs)
         return rm_scores
@@ -195,7 +209,8 @@ class DAPORewardScales:
                              diffs: list, 
                              comments: list, 
                              labels: list,
-                             config: dict = None) -> dict:
+                             config: dict = None,
+                             prompts: list = None) -> dict:
         """
         Computes total reward for a batch of completions.
         Returns total_rewards list and a dict of component averages for logging.
@@ -212,7 +227,7 @@ class DAPORewardScales:
         
         # R1: Rule-based reasoning quality
         # Evaluates the <think> trace directly for overlap, coherence, and length
-        r1_scaled = self.compute_r1_reasoning_quality(parsed, diffs, comments)
+        r1_scaled = self.compute_r1_reasoning_quality(parsed, diffs, comments, prompts)
         
         # R2
         r2 = self.compute_r2_outcome_match(decisions, labels)
@@ -243,6 +258,16 @@ class DAPORewardScales:
             
             total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
+            
+        # Entropy Bonus Floor
+        surface_count = decisions.count("SURFACE")
+        surface_ratio = surface_count / max(1, len(decisions))
+        surface_bonus = 0.5 if surface_ratio < 0.10 else 0.0
+        
+        if surface_bonus > 0.0:
+            for i in range(batch_size):
+                if decisions[i] == "SURFACE":
+                    total_rewards[i] += surface_bonus
             
         print("\n" + "="*50)
         print(f"DEBUG - Sample Completion:\n{completions[0]}\n")

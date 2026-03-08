@@ -225,7 +225,7 @@ class DAPOTrainer:
                 
                 # 3. Compute Rewards
                 rewards, logs = self.reward_scales.compute_total_reward(
-                    flat_completions, flat_diffs, flat_comments, flat_labels, self.config
+                    flat_completions, flat_diffs, flat_comments, flat_labels, self.config, flat_prompts
                 )
                 
                 # Format rewards into groups and calculate Advantage
@@ -304,7 +304,7 @@ class DAPOTrainer:
                     # Calculate ratio and clip per token
                     mb_loss = 0.0
                     mb_valid_tokens = 0
-                    kl_penalty_weight = self.config.get("dapo", {}).get("kl_penalty", 0.04)
+                    kl_penalty_weight = self.config.get("kl_penalty", 0.04)
                     
                     for idx in range(len(mb_adv)):
                         start_idx = prompt_lens[idx]
