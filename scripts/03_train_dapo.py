@@ -25,14 +25,13 @@ from src.training.reward_model import RewardModel
 from src.data.team_dataset import simulate_team_datasets
 from src.training.dapo_trainer import DAPOTrainer
 
-def start_sglang_server(model_name: str, port: int, dapo_config: dict, initial_lora_path: str) -> subprocess.Popen:
+def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subprocess.Popen:
     """Starts the SGLang generation engine as a background process."""
     logger = logging.getLogger("dapo_main")
     logger.info(f"Starting SGLang server for {model_name} on port {port}...")
     
     # We use subprocess to isolate SGLang memory from PyTorch memory safely.
     # --disable-cuda-graph is often needed for dynamic LoRAs if memory is extremely tight
-    # --lora-paths allows dynamic swapping later via the API.
     
     lora_rank = str(dapo_config.get("lora_r", 16))
     lora_targets = dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
@@ -44,8 +43,8 @@ def start_sglang_server(model_name: str, port: int, dapo_config: dict, initial_l
         "--trust-remote-code",
         # Enable dynamic LoRA reloading during runtime
         "--enable-lora",
-        "--lora-paths", f"default={initial_lora_path}",
         "--max-lora-rank", lora_rank,
+        "--max-loras-per-batch", "2",
         "--lora-target-modules"
     ] + lora_targets + [
         # Limit memory to 50% so PyTorch has space for training
@@ -135,22 +134,16 @@ def main():
     rm_model = rm_model.to("cuda")
     rm_model.eval()
     
-    # 3. Initialize Trainer (creates base model + initial LoRA)
+    # 3. Initialize Trainer (creates base model)
     logger.info("Initializing DAPO trainer base model and LoRA adapter...")
     trainer = DAPOTrainer(config, rm_model, rm_model.tokenizer)
     
-    # 4. Save Initial LoRA to Disk for SGLang Pre-registration
-    initial_lora_dir = "/tmp/lora_dapo_initial"
-    os.makedirs(initial_lora_dir, exist_ok=True)
-    trainer.model.save_pretrained(initial_lora_dir)
-    logger.info(f"Initial LoRA saved to {initial_lora_dir}")
-    
-    # 5. Start SGLang Subprocess
+    # 4. Start SGLang Subprocess
     dapo_config = config.get("dapo", {})
     config.setdefault("dapo", {})["sglang_port"] = args.sglang_port
     base_model_name = dapo_config.get("model_name", "Qwen/Qwen2.5-Coder-3B-Instruct")
     
-    sglang_process = start_sglang_server(base_model_name, args.sglang_port, dapo_config, initial_lora_dir)
+    sglang_process = start_sglang_server(base_model_name, args.sglang_port, dapo_config)
     
     try:
         

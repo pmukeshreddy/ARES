@@ -22,7 +22,24 @@ class SGLangBridge:
     """Handles communication with the SGLang backend for fast rollouts."""
     def __init__(self, port=30000):
         self.base_url = f"http://localhost:{port}"
-        
+
+    def load_lora(self, lora_name: str, lora_path: str):
+        """Dynamically load/reload a LoRA adapter into SGLang."""
+        resp = requests.post(f"{self.base_url}/load_lora_adapter", json={
+            "lora_name": lora_name,
+            "lora_path": lora_path,
+        })
+        if resp.status_code != 200:
+            logger.error(f"Failed to load LoRA: {resp.text}")
+        return resp.json()
+
+    def unload_lora(self, lora_name: str):
+        """Unload a LoRA adapter from SGLang."""
+        resp = requests.post(f"{self.base_url}/unload_lora_adapter", json={
+            "lora_name": lora_name,
+        })
+        return resp.json()
+
     def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256, tokenizer=None) -> List[List[str]]:
         """Generates N completions per prompt using SGLang's API."""
         url = f"{self.base_url}/generate"
@@ -173,12 +190,19 @@ class DAPOTrainer:
                 # 1. Sync LoRA weights to disk for SGLang
                 self.model.save_pretrained(lora_sync_dir)
                 
-                # 2. Rollout 16 samples per prompt using SGLang (oversampling)
+                # 2. Dynamically load into SGLang (or reload with updated weights)
+                try:
+                    self.sglang.unload_lora("active_lora")
+                except Exception:
+                    pass  # First time, nothing to unload
+                self.sglang.load_lora("active_lora", str(lora_sync_dir))
+                
+                # 3. Rollout 16 samples per prompt using SGLang (oversampling)
                 # completions_grouped = List of length batch_size, where each element is a list of N strings
                 oversample_size = self.group_size * 2
                 completions_grouped = self.sglang.generate(
                     prompts=prompts,
-                    lora_path=lora_sync_dir,
+                    lora_path="active_lora",
                     n=oversample_size,
                     max_tokens=self.config.get("max_new_tokens", 256),
                     tokenizer=self.tokenizer
