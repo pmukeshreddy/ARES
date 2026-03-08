@@ -81,12 +81,10 @@ try:
         return orig_from_pretrained(*args, **kwargs)
     transformers.AutoModelForCausalLM.from_pretrained = patched_from_pretrained
     
-    rm_model = RewardModel.from_config(config)
-    rm_tokenizer = rm_model.tokenizer
-    
     checkpoint_path = Path("checkpoints/reward_model/best")
     if checkpoint_path.exists():
-        rm_model.load(str(checkpoint_path))
+        rm_model = RewardModel.load_checkpoint(str(checkpoint_path), config)
+        rm_tokenizer = rm_model.tokenizer
         print("Reward model loaded!")
         
         device = "cuda" if torch.cuda.is_available() else "cpu"
