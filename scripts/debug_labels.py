@@ -70,6 +70,17 @@ try:
     with open("configs/default.yaml") as f:
         config = yaml.safe_load(f)
     
+    # Override flash_attention_2 since it's broken on this server
+    config["reward_model"]["attn_implementation"] = "eager"
+    
+    # Monkey-patch from_config to skip flash_attention
+    import transformers
+    orig_from_pretrained = transformers.AutoModelForCausalLM.from_pretrained
+    def patched_from_pretrained(*args, **kwargs):
+        kwargs.pop("attn_implementation", None)
+        return orig_from_pretrained(*args, **kwargs)
+    transformers.AutoModelForCausalLM.from_pretrained = patched_from_pretrained
+    
     rm_model = RewardModel.from_config(config)
     rm_tokenizer = rm_model.tokenizer
     
