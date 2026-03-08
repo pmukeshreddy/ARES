@@ -8,6 +8,7 @@ and calculates metrics like Accuracy, F1, and Precision/Recall.
 """
 
 import os
+import sys
 import json
 import logging
 from pathlib import Path
@@ -17,6 +18,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 
+# Add project root to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.training.rewards import parse_completion
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
