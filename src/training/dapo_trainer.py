@@ -279,6 +279,14 @@ class DAPOTrainer:
                                 
                 advantages = normalize_within_group(total_rewards)
                 
+                # ------ DEBUG PRINTS REQUESTED BY USER ------
+                if advantages.size(0) > 0:
+                    print("\n[DEBUG MATH] Group 0 (first prompt):")
+                    print(f" Raw R2 Tensor : {r2_tensor[0].cpu().tolist()}")
+                    print(f" Total Sum     : {total_rewards[0].cpu().tolist()}")
+                    print(f" Final Norm Adv: {advantages[0].cpu().tolist()}\n")
+                # --------------------------------------------
+                
                 # 4. Dynamic Resampling: Keep only top 25% and bottom 25% of advantages
                 keep_per_group = self.group_size # e.g. 8
                 half_keep = keep_per_group // 2
