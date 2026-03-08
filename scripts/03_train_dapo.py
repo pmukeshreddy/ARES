@@ -25,7 +25,7 @@ from src.training.reward_model import RewardModel
 from src.data.team_dataset import simulate_team_datasets
 from src.training.dapo_trainer import DAPOTrainer
 
-def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subprocess.Popen:
+def start_sglang_server(model_name: str, port: int, dapo_config: dict, initial_lora_path: str) -> subprocess.Popen:
     """Starts the SGLang generation engine as a background process."""
     logger = logging.getLogger("dapo_main")
     logger.info(f"Starting SGLang server for {model_name} on port {port}...")
@@ -44,6 +44,7 @@ def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subpro
         "--trust-remote-code",
         # Enable dynamic LoRA reloading during runtime
         "--enable-lora",
+        "--lora-paths", f"default={initial_lora_path}",
         "--max-lora-rank", lora_rank,
         "--lora-target-modules"
     ] + lora_targets + [
@@ -134,19 +135,24 @@ def main():
     rm_model = rm_model.to("cuda")
     rm_model.eval()
     
-    # 3. Start SGLang Subprocess
-    dapo_config = config.get("dapo", {})
-    # Inject port
-    config.setdefault("dapo", {})["sglang_port"] = args.sglang_port
+    # 3. Initialize Trainer (creates base model + initial LoRA)
+    logger.info("Initializing DAPO trainer base model and LoRA adapter...")
+    trainer = DAPOTrainer(config, rm_model, rm_model.tokenizer)
     
-    # 3B coder instruct base
+    # 4. Save Initial LoRA to Disk for SGLang Pre-registration
+    initial_lora_dir = "/tmp/lora_dapo_initial"
+    os.makedirs(initial_lora_dir, exist_ok=True)
+    trainer.model.save_pretrained(initial_lora_dir)
+    logger.info(f"Initial LoRA saved to {initial_lora_dir}")
+    
+    # 5. Start SGLang Subprocess
+    dapo_config = config.get("dapo", {})
+    config.setdefault("dapo", {})["sglang_port"] = args.sglang_port
     base_model_name = dapo_config.get("model_name", "Qwen/Qwen2.5-Coder-3B-Instruct")
     
-    sglang_process = start_sglang_server(base_model_name, args.sglang_port, dapo_config)
+    sglang_process = start_sglang_server(base_model_name, args.sglang_port, dapo_config, initial_lora_dir)
     
     try:
-        # 4. Initialize Trainer
-        trainer = DAPOTrainer(config, rm_model, rm_model.tokenizer)
         
         # 5. Train Per Team
         for team in teams:
