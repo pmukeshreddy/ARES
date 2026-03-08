@@ -41,12 +41,19 @@ class SGLangBridge:
         return resp.json()
 
     def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256, tokenizer=None) -> List[List[str]]:
-        """Generates N completions per prompt using SGLang's API."""
+        """Generates N completions per prompt using SGLang's API.
+        
+        Forced Exploration: generates n/2 completions normally and n/2 with a
+        SURFACE-biased prefix to guarantee diversity. Without this, the model
+        generates all-FILTER groups → zero advantage variance → no learning.
+        """
         url = f"{self.base_url}/generate"
         results = []
         
+        half_n = n // 2
+        
         for p in prompts:
-            # Format prompt with ChatML template so the Instruct model understands it
+            # Format prompt with ChatML template
             if tokenizer is not None:
                 messages = [
                     {"role": "system", "content": "You are a helpful AI code reviewer."},
@@ -55,33 +62,62 @@ class SGLangBridge:
                 formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             else:
                 formatted_prompt = f"<|im_start|>system\nYou are a helpful AI code reviewer.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
-                
-            payload = {
-                "text": formatted_prompt,
-                "sampling_params": {
-                    "temperature": 1.0,
-                    "top_p": 0.95,
-                    "max_new_tokens": max_tokens
-                    # "n" is ignored by sglang /generate, we loop manually
-                },
-                "lora_path": lora_path
-            }
             
+            # SURFACE-exploration prefix: starts the <think> with a surface-leaning sentence
+            # This doesn't force the decision — the model still reasons and can end up at FILTER
+            # But it ensures the group has SOME completions that explore the SURFACE path
+            surface_prefix = "<think>\nThis comment raises a valid concern that aligns with the team's priorities. Let me analyze why."
+            formatted_prompt_explore = formatted_prompt + surface_prefix
+                
             prompt_completions = []
-            for _ in range(n):
+            
+            # First half: normal generation (model chooses freely)
+            for i in range(half_n):
                 try:
+                    payload = {
+                        "text": formatted_prompt,
+                        "sampling_params": {
+                            "temperature": 1.0,
+                            "top_p": 0.95,
+                            "max_new_tokens": max_tokens
+                        },
+                        "lora_path": lora_path
+                    }
                     resp = requests.post(url, json=payload).json()
                     
-                    # DEBUG LOGGING FOR BUG 1
-                    if _ == 0:  # Only print once per prompt to avoid spam
+                    if i == 0:
                         logger.info(f"SGLang raw response keys: {list(resp.keys())}, snippet: {str(resp)[:300]}")
                         
                     completion = resp.get("text", "")
-                    if isinstance(completion, list): # just in case
+                    if isinstance(completion, list):
                         completion = completion[0] if len(completion) > 0 else ""
                     prompt_completions.append(completion)
                 except Exception as e:
                     logger.error(f"SGLang generation failed: {e}")
+                    prompt_completions.append("")
+            
+            # Second half: SURFACE-exploration generation (seeded with surface-leaning prefix)
+            for i in range(n - half_n):
+                try:
+                    payload = {
+                        "text": formatted_prompt_explore,
+                        "sampling_params": {
+                            "temperature": 1.0,
+                            "top_p": 0.95,
+                            "max_new_tokens": max_tokens
+                        },
+                        "lora_path": lora_path
+                    }
+                    resp = requests.post(url, json=payload).json()
+                    
+                    completion = resp.get("text", "")
+                    if isinstance(completion, list):
+                        completion = completion[0] if len(completion) > 0 else ""
+                    # Prepend the surface prefix to get the full completion
+                    completion = surface_prefix + completion
+                    prompt_completions.append(completion)
+                except Exception as e:
+                    logger.error(f"SGLang exploration generation failed: {e}")
                     prompt_completions.append("")
                     
             results.append(prompt_completions)
