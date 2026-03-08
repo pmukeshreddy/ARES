@@ -116,8 +116,8 @@ class DAPORewardScales:
         w1 = (total_labeled / (2.0 * max(1, batch_l1))) if total_labeled > 0 else 1.0
         w0 = (total_labeled / (2.0 * max(1, batch_l0))) if total_labeled > 0 else 1.0
         
-        fp_pen = self.config.get("r2_false_positive_penalty", -1.5)
-        fn_pen = self.config.get("r2_false_negative_penalty", -0.7)
+        fp_pen = self.config.get("r2_false_positive_penalty", -1.0)
+        fn_pen = self.config.get("r2_false_negative_penalty", -1.0)
         
         rewards = []
         for dec, label, h in zip(decisions, ground_truth_labels, has_label):
