@@ -70,11 +70,17 @@ class SGLangBridge:
             try:
                 resp = requests.post(url, json=payload).json()
                 
-                # In native SGLang, passing n=16 returns 'text' as a list of strings
-                completions = resp.get("text", [])
-                
-                if not isinstance(completions, list):
-                    completions = [completions]
+                # Handle both old and new SGLang response formats:
+                # Old: {"text": ["completion1", "completion2", ...]}
+                # New: [{"text": "completion1"}, {"text": "completion2"}, ...]
+                if isinstance(resp, list):
+                    completions = [item.get("text", "") if isinstance(item, dict) else str(item) for item in resp]
+                elif isinstance(resp, dict):
+                    completions = resp.get("text", [])
+                    if not isinstance(completions, list):
+                        completions = [completions]
+                else:
+                    completions = []
                     
                 # Pad with empty strings if it failed to return exactly N
                 while len(completions) < n:
@@ -82,7 +88,7 @@ class SGLangBridge:
                 
                 # Just log the first prompt's first completion for debugging
                 if len(results) == 0:
-                    logger.info(f"SGLang raw response keys: {list(resp.keys())}, snippet: {str(resp)[:300]}")
+                    logger.info(f"SGLang raw response type: {type(resp).__name__}, snippet: {str(resp)[:300]}")
                     
                 results.append(completions[:n])
                 
