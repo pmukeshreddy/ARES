@@ -270,28 +270,14 @@ class DAPOTrainer:
                     s = t.std(dim=1, keepdim=True)
                     return (t - m) / (s + 1e-8)
                 
-                # Normalize each reward component independently, then weight and sum
-                adv_r1 = w_r1 * normalize_within_group(r1_tensor)
-                adv_r2 = w_r2 * normalize_within_group(r2_tensor)
-                adv_r3 = w_r3 * normalize_within_group(r3_tensor)
-                adv_r4 = w_r4 * normalize_within_group(r4_tensor)
-                adv_r5 = w_r5 * normalize_within_group(r5_tensor)
-                
-                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
-                
-                # Check if any group has meaningful variance AND decision diversity
-                total_std = advantages.std(dim=1)
-                valid_groups = (total_std > 0.01)
-                
-                # Also skip groups where ALL completions chose the same decision
-                # (these contribute zero decision-learning signal regardless of rewards)
-                for g_idx in range(r2_tensor.size(0)):
-                    group_r2 = r2_tensor[g_idx]  # R2 varies only if decisions differ
-                    if group_r2.std() < 0.01:  # All same decision
-                        valid_groups[g_idx] = False
-                
-                if valid_groups.sum() == 0:
-                    continue  # No learning signal this batch
+                # GDPO BUG FIX: Previously, we normalized EACH reward component independently.
+                # If the model collapsed to 100% FILTER, R2 variance became 0, so its advantage became 0.
+                # Standard GRPO computes the TOTAL weighted reward first, then normalizes that sum,
+                # preserving the relative magnitudes of the penalties.
+                total_rewards = (w_r1 * r1_tensor) + (w_r2 * r2_tensor) + \
+                                (w_r3 * r3_tensor) + (w_r4 * r4_tensor) + (w_r5 * r5_tensor)
+                                
+                advantages = normalize_within_group(total_rewards)
                 
                 # 4. Dynamic Resampling: Keep only top 25% and bottom 25% of advantages
                 keep_per_group = self.group_size # e.g. 8

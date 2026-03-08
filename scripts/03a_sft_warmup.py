@@ -63,9 +63,9 @@ def create_sft_example(item: dict, tokenizer) -> str:
         {"role": "system", "content": "You are a helpful AI code reviewer."},
         {"role": "user", "content": prompt}
     ]
-    formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     
-    return formatted_prompt + ideal_completion
+    return prompt_text, ideal_completion
 
 
 def sft_warmup_team(model, tokenizer, team_name: str, train_file: str, device: str, num_epochs: int = 2, lr: float = 5e-6):
@@ -96,13 +96,21 @@ def sft_warmup_team(model, tokenizer, team_name: str, train_file: str, device: s
         
         for idx in tqdm(random_order, desc=f"SFT Epoch {epoch+1}/{num_epochs}"):
             item = dataset[idx]
-            full_text = create_sft_example(item, tokenizer)
+            prompt_text, completion_text = create_sft_example(item, tokenizer)
+            full_text = prompt_text + completion_text
             
-            # Tokenize
+            # Tokenize full combined text
             inputs = tokenizer(full_text, truncation=True, max_length=1536, return_tensors="pt").to(device)
+            
+            # Tokenize just the prompt to find where to mask
+            prompt_inputs = tokenizer(prompt_text, truncation=True, max_length=1536, return_tensors="pt")
+            prompt_len = prompt_inputs.input_ids.shape[1]
             
             # Standard causal LM loss (predict next token)
             labels = inputs.input_ids.clone()
+            
+            # Mask out the prompt so loss is ONLY computed on the completion!
+            labels[0, :prompt_len] = -100
             
             outputs = model(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask, labels=labels)
             loss = outputs.loss
