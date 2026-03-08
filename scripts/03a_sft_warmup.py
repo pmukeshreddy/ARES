@@ -215,8 +215,9 @@ def main():
         
         sft_warmup_team(model, tokenizer, team_name, threshold, full_dataset, precomputed_scores, device)
         
-        # Save the warm-up checkpoint
-        save_path = output_dir / f"sft_warmup_{team_name}"
+        # Normalize team name to snake_case to match folder-based lookup in 03_train_dapo.py
+        normalized_name = team_name.lower().replace("-", "_")
+        save_path = output_dir / f"sft_warmup_{normalized_name}"
         model.save_pretrained(str(save_path))
         logger.info(f"Saved SFT warm-up checkpoint to {save_path}")
     
