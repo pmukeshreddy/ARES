@@ -235,6 +235,12 @@ class DAPOTrainer:
                 # A_i = (R_i - mean(R)) / (std(R) + eps)
                 mean_grouped = rewards_grouped.mean(dim=1, keepdim=True)
                 std_grouped = rewards_grouped.std(dim=1, keepdim=True)
+                
+                # If no variance in group, skip it entirely
+                valid_groups = (std_grouped.squeeze(-1) > 0.01)
+                if valid_groups.sum() == 0:
+                    continue  # No learning signal this batch
+                    
                 advantages = (rewards_grouped - mean_grouped) / (std_grouped + 1e-8)
                 
                 # 4. Dynamic Resampling: Keep only top 25% and bottom 25% of advantages

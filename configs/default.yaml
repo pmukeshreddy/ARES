@@ -107,8 +107,8 @@ dapo:
   max_new_tokens: 256
   
   # Reward Weights
-  r1_weight: 0.30      # Reward model score
-  r2_weight: 0.30      # Outcome match
-  r3_weight: 0.10      # Calibration
-  r4_weight: 0.10      # Format compliance
+  r1_weight: 0.00      # Reward model score
+  r2_weight: 0.45      # Outcome match
+  r3_weight: 0.20      # Calibration
+  r4_weight: 0.15      # Format compliance
   r5_weight: 0.20      # Overlong penalty
