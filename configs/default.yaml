@@ -84,7 +84,8 @@ embeddings:
 dapo:
   model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
   output_dir: "checkpoints/dapo"
-  reward_model_path: "checkpoints/reward_model/best"
+  precomputed_scores_path: "data/precomputed_rm_scores.json"
+  unlabeled_data_path: "data/unlabeled_pairs.json"
   
   # LoRA
   lora_r: 16
@@ -103,13 +104,17 @@ dapo:
   clip_ratio_high: 0.28
   dynamic_sampling: true
   token_level_loss: true
-  kl_penalty: 0.10
+  kl_penalty: 0.0
   entropy_bonus: 0.03    # Token-level entropy bonus to prevent policy collapse
   max_new_tokens: 256
   
   # Reward Weights
   r1_weight: 0.20      # Reasoning quality
   r2_weight: 0.35      # Outcome match (team labels)
-  r3_weight: 0.10      # RM Agreement (Phase 1 F1=0.99 knowledge transfer)
+  r3_weight: 0.15      # RM Agreement (Phase 1 F1=0.99 knowledge transfer)
   r4_weight: 0.15      # Format compliance
   r5_weight: 0.20      # Overlong penalty
+  
+  # R2 configuration
+  r2_false_positive_penalty: -1.5
+  r2_false_negative_penalty: -0.7

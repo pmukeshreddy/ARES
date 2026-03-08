@@ -100,9 +100,31 @@ class SGLangBridge:
 
 
 class DAPOTrainer:
-    def __init__(self, config: dict, rm_model, rm_tokenizer):
+    def __init__(self, config: dict):
         self.config = config["dapo"]
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # Load precomputed scores
+        import json
+        from pathlib import Path
+        import os
+        PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+        precomputed_scores_path = PROJECT_ROOT / self.config.get("precomputed_scores_path", "data/precomputed_rm_scores.json")
+        self.precomputed_scores = {}
+        if precomputed_scores_path.exists():
+            with open(precomputed_scores_path, "r") as f:
+                self.precomputed_scores = json.load(f)
+        else:
+            logger.warning("Precomputed scores file not found!")
+            
+        unlabeled_path = PROJECT_ROOT / self.config.get("unlabeled_data_path", "data/unlabeled_pairs.json")
+        self.unlabeled_dataset = []
+        if unlabeled_path.exists():
+            with open(unlabeled_path, "r") as f:
+                for line in f:
+                    self.unlabeled_dataset.append(json.loads(line))
+        else:
+            logger.warning("Unlabeled dataset not found!")
         
         # Load Base Model & Tokenizer for PyTorch Gradients
         self.model_name = self.config["model_name"]
@@ -140,7 +162,7 @@ class DAPOTrainer:
         self.model.print_trainable_parameters()
         
         # Rewards & SGLang Bridge
-        self.reward_scales = DAPORewardScales(rm_model, rm_tokenizer, device=self.device, config=self.config)
+        self.reward_scales = DAPORewardScales(tokenizer=self.tokenizer, precomputed_scores=self.precomputed_scores, device=self.device, config=self.config)
         self.sglang = SGLangBridge(port=self.config.get("sglang_port", 30000))
         
         # GRPO / DAPO Params
@@ -212,12 +234,35 @@ class DAPOTrainer:
             # Shuffle
             np.random.shuffle(train_dataset)
             
+            import hashlib
             for i in tqdm(range(0, len(train_dataset), batch_size), desc=f"Team {team_name} Epoch {epoch+1}"):
-                batch = train_dataset[i:i+batch_size]
+                labeled_batch = train_dataset[i:i+batch_size//2]
+                for item in labeled_batch:
+                    item["has_label"] = True
+                    
+                import random
+                unlabeled_batch = []
+                if len(self.unlabeled_dataset) > 0:
+                    samples_needed = batch_size - len(labeled_batch)
+                    unlabeled_samples = random.sample(self.unlabeled_dataset, min(samples_needed, len(self.unlabeled_dataset)))
+                    for item in unlabeled_samples:
+                        # Generate prompt for unlabeled 
+                        if "prompt" not in item:
+                            from src.data.team_dataset import generate_prompt
+                            item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
+                        item["has_label"] = False
+                        item["label"] = 0 # Dummy
+                        unlabeled_batch.append(item)
+                        
+                batch = labeled_batch + unlabeled_batch
+                
                 prompts = [item["prompt"] for item in batch]
                 diffs = [item["diff"] for item in batch]
                 comments = [item["comment"] for item in batch]
                 labels = [item["label"] for item in batch]
+                has_label = [item["has_label"] for item in batch]
+                # Default to MD5 hash if example_id is missing to securely join with precomputed scores
+                example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
                 
                 # 1. Sync LoRA weights to disk for SGLang
                 self.model.save_pretrained(lora_sync_dir)
@@ -246,6 +291,8 @@ class DAPOTrainer:
                 flat_diffs = []
                 flat_comments = []
                 flat_labels = []
+                flat_example_ids = []
+                flat_has_label = []
                 
                 for b_idx in range(len(batch)):
                     group_comps = completions_grouped[b_idx]
@@ -254,10 +301,12 @@ class DAPOTrainer:
                     flat_diffs.extend([diffs[b_idx]] * oversample_size)
                     flat_comments.extend([comments[b_idx]] * oversample_size)
                     flat_labels.extend([labels[b_idx]] * oversample_size)
+                    flat_example_ids.extend([example_ids[b_idx]] * oversample_size)
+                    flat_has_label.extend([has_label[b_idx]] * oversample_size)
                 
                 # 3. Compute Rewards
                 rewards, logs = self.reward_scales.compute_total_reward(
-                    flat_completions, flat_diffs, flat_comments, flat_labels, self.config, flat_prompts
+                    flat_completions, flat_diffs, flat_comments, flat_labels, flat_example_ids, flat_has_label, self.config, flat_prompts
                 )
                 
                 # GDPO: Per-Reward Normalization (normalize each R1-R6 independently within each group)
@@ -269,6 +318,7 @@ class DAPOTrainer:
                 r3_tensor = torch.tensor(logs["r3_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r4_tensor = torch.tensor(logs["r4_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r6_tensor = torch.tensor(logs["r6_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
                     """Normalize each row (group) independently: (x - mean) / (std + eps)"""
@@ -276,52 +326,45 @@ class DAPOTrainer:
                     s = t.std(dim=1, keepdim=True)
                     return (t - m) / (s + 1e-8)
                 
-                # GDPO BUG FIX: Previously, we normalized EACH reward component independently.
-                # If the model collapsed to 100% FILTER, R2 variance became 0, so its advantage became 0.
-                # Standard GRPO computes the TOTAL weighted reward first, then normalizes that sum,
-                # preserving the relative magnitudes of the penalties.
-                total_rewards = (w_r1 * r1_tensor) + (w_r2 * r2_tensor) + \
-                                (w_r3 * r3_tensor) + (w_r4 * r4_tensor) + (w_r5 * r5_tensor)
-                                
-                advantages = normalize_within_group(total_rewards)
+                # Per-component normalization as requested by user
+                adv_r1 = normalize_within_group(r1_tensor) * w_r1
+                adv_r2 = normalize_within_group(r2_tensor) * w_r2
+                adv_r3 = normalize_within_group(r3_tensor) * w_r3
+                adv_r4 = normalize_within_group(r4_tensor) * w_r4
+                adv_r5 = normalize_within_group(r5_tensor) * w_r5
+                adv_r6 = normalize_within_group(r6_tensor) # R6 has no explicit config weight
                 
-                # ------ DEBUG PRINTS REQUESTED BY USER ------
-                if advantages.size(0) > 0:
-                    print("\n[DEBUG MATH] Group 0 (first prompt):")
-                    print(f" Raw R2 Tensor : {r2_tensor[0].cpu().tolist()}")
-                    print(f" Total Sum     : {total_rewards[0].cpu().tolist()}")
-                    print(f" Final Norm Adv: {advantages[0].cpu().tolist()}\n")
-                # --------------------------------------------
+                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5 + adv_r6
                 
-                # 4. Dynamic Resampling: Keep only top 25% and bottom 25% of advantages
-                keep_per_group = self.group_size # e.g. 8
-                half_keep = keep_per_group // 2
-                
-                filtered_prompts = []
-                filtered_completions = []
-                filtered_advantages = []
+                # Dynamic sampling: replace the top/bottom 25% filtering with true DAPO variance check
+                valid_groups = []
+                for g_idx in range(r2_tensor.size(0)):
+                    # Check if all completions got exact same R2
+                    if r2_tensor[g_idx].std() < 1e-5:
+                        valid_groups.append(False)
+                    else:
+                        valid_groups.append(True)
+                        
+                if sum(valid_groups) == 0:
+                    continue
+                    
+                flat_prompts_filtered = []
+                flat_completions_filtered = []
+                flat_advantages_filtered = []
                 
                 for b_idx in range(advantages.size(0)):
+                    if not valid_groups[b_idx]:
+                        continue
                     group_advs = advantages[b_idx]
-                    
-                    # Sort indices by advantage
-                    sorted_indices = torch.argsort(group_advs, descending=True)
-                    
-                    # Pick highest `half_keep` and lowest `half_keep`
-                    top_indices = sorted_indices[:half_keep]
-                    bottom_indices = sorted_indices[-half_keep:]
-                    
-                    selected_indices = torch.cat([top_indices, bottom_indices]).cpu().tolist()
-                    
-                    for idx in selected_indices:
+                    for idx in range(oversample_size):
                         flat_idx = b_idx * oversample_size + idx
-                        filtered_prompts.append(flat_prompts[flat_idx])
-                        filtered_completions.append(flat_completions[flat_idx])
-                        filtered_advantages.append(group_advs[idx].item())
+                        flat_prompts_filtered.append(flat_prompts[flat_idx])
+                        flat_completions_filtered.append(flat_completions[flat_idx])
+                        flat_advantages_filtered.append(group_advs[idx].item())
                 
-                flat_prompts = filtered_prompts
-                flat_completions = filtered_completions
-                flat_advantages = torch.tensor(filtered_advantages, dtype=torch.float32, device=self.device)
+                flat_prompts = flat_prompts_filtered
+                flat_completions = flat_completions_filtered
+                flat_advantages = torch.tensor(flat_advantages_filtered, dtype=torch.float32, device=self.device)
                 
                 # 5. Compute GRPO Loss & Update on the filtered sequences
                 # Convert prompts + completions to tensors

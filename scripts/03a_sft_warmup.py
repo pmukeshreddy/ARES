@@ -36,11 +36,9 @@ def create_sft_example(item: dict, tokenizer) -> str:
     label = item["label"]
     diff = item.get("diff", "")[:200]
     comment = item.get("comment", "")[:200]
-    
     # Create a well-formed ideal completion
     decision = "SURFACE" if label == 1 else "FILTER"
-    # Fallback to hardcoded scores only for older datasets lacking rm_score
-    score = str(item.get("rm_score", 0.8 if label == 1 else 0.2))
+    score = item.get("score", 0.5)
     
     # Create a grounded reasoning trace
     if label == 1:
@@ -56,7 +54,7 @@ def create_sft_example(item: dict, tokenizer) -> str:
             f"of code quality. Filtering this comment would reduce noise for the team."
         )
     
-    ideal_completion = f"<think>\n{reasoning}\n</think>\n<score>{score}</score>\n<decision>{decision}</decision>"
+    ideal_completion = f"<think>\n{reasoning}\n</think>\n<score>{score:.4f}</score>\n<decision>{decision}</decision>"
     
     # Format with chat template
     messages = [
@@ -68,21 +66,35 @@ def create_sft_example(item: dict, tokenizer) -> str:
     return prompt_text, ideal_completion
 
 
-def sft_warmup_team(model, tokenizer, team_name: str, train_file: str, device: str, num_epochs: int = 2, lr: float = 5e-6):
-    """Runs SFT warm-up for a single team."""
+def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 1, lr: float = 5e-6):
+    """Runs SFT warm-up for a single team using a subset of the unlabeled data."""
     logger.info(f"\n{'='*50}\nSFT Warm-Up for team: {team_name}\n{'='*50}")
     
-    if not os.path.exists(train_file):
-        logger.error(f"Train file not found: {train_file}")
-        return
+    import random
+    import hashlib
+    from src.data.team_dataset import generate_prompt
+    
+    # Use up to 300 samples for SFT warm-up to deeply bake in the score calibration
+    raw_dataset = random.sample(full_dataset, min(300, len(full_dataset)))
     
     dataset = []
-    with open(train_file, "r") as f:
-        for line in f:
-            dataset.append(json.loads(line))
-    
-    # Use up to 30 samples for SFT warm-up (small but effective)
-    dataset = dataset[:30]
+    for item in raw_dataset:
+        diff = item.get("diff", "")
+        comment = item.get("comment", "")
+        ex_id = item.get("example_id", hashlib.md5(f"{diff}_{comment}".encode('utf-8')).hexdigest())
+        
+        score = precomputed_scores.get(ex_id, 0.5)
+        label = 1 if score >= threshold else 0
+        prompt = generate_prompt(diff, comment, team_name)
+        
+        dataset.append({
+            "prompt": prompt,
+            "label": label,
+            "diff": diff,
+            "comment": comment,
+            "score": score
+        })
+        
     logger.info(f"Using {len(dataset)} samples for SFT warm-up")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -134,36 +146,29 @@ def main():
     
     dapo_config = config["dapo"]
     model_name = dapo_config["model_name"]
-    teams_dir = PROJECT_ROOT / "data/teams"
     output_dir = PROJECT_ROOT / "checkpoints/sft_warmup"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. Ensure Data Exists
-    if not teams_dir.exists() or len(list(teams_dir.glob("*"))) == 0:
-        logger.info("Simulated team data not found, generating now using Reward Model for labels...")
+    # Load precomputed scores and unlabeled dataset
+    precomputed_scores_path = PROJECT_ROOT / dapo_config.get("precomputed_scores_path", "data/precomputed_rm_scores.json")
+    if not precomputed_scores_path.exists():
+        logger.error(f"Precomputed scores not found at {precomputed_scores_path}. Run 00b_precompute_scores.py first!")
+        sys.exit(1)
         
-        # Load RM
-        rm_path = PROJECT_ROOT / "checkpoints/reward_model/best"
-        if not rm_path.exists():
-            logger.error(f"Phase 1 RM checkpoint not found at {rm_path}")
-            sys.exit(1)
-            
-        rm_model = RewardModel.load_checkpoint(str(rm_path), config)
-        rm_model = rm_model.to(device)
-        rm_model.eval()
+    with open(precomputed_scores_path, "r") as f:
+        precomputed_scores = json.load(f)
         
-        processed_dir = PROJECT_ROOT / config["data"]["processed_dir"]
-        base_data = processed_dir / "train.jsonl"
-        if (processed_dir / "train_small.jsonl").exists():
-            base_data = processed_dir / "train_small.jsonl"
-            
-        simulate_team_datasets(str(base_data), str(teams_dir), rm_model=rm_model, rm_tokenizer=rm_model.tokenizer)
+    unlabeled_path = PROJECT_ROOT / dapo_config.get("unlabeled_data_path", "data/unlabeled_pairs.json")
+    if not unlabeled_path.exists():
+        logger.error(f"Unlabeled dataset not found at {unlabeled_path}. Run 00b_precompute_scores.py first!")
+        sys.exit(1)
         
-        # Free RM from memory to save VRAM for SFT
-        del rm_model
-        torch.cuda.empty_cache()
+    full_dataset = []
+    with open(unlabeled_path, "r") as f:
+        for line in f:
+            full_dataset.append(json.loads(line))
     
     # Load model & tokenizer ONCE
     logger.info(f"Loading base model: {model_name}")
@@ -189,19 +194,17 @@ def main():
     model = get_peft_model(base_model, lora_config)
     
     # SFT warm-up for each team
-    for team_dir in sorted(teams_dir.iterdir()):
-        if not team_dir.is_dir():
-            continue
-        
-        team_name = team_dir.name
-        train_file = str(team_dir / "train.jsonl")
+    from src.data.team_dataset import TEAM_PROFILES
+    
+    for team_name, profile in TEAM_PROFILES.items():
+        threshold = profile["rm_threshold"]
         
         # Reset LoRA weights for each team
         for name, param in model.named_parameters():
             if "lora" in name:
                 torch.nn.init.normal_(param, std=0.01)
         
-        sft_warmup_team(model, tokenizer, team_name, train_file, device)
+        sft_warmup_team(model, tokenizer, team_name, threshold, full_dataset, precomputed_scores, device)
         
         # Save the warm-up checkpoint
         save_path = output_dir / f"sft_warmup_{team_name}"
