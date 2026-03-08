@@ -217,6 +217,12 @@ class DAPORewardScales:
             total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
             
+        print("\n" + "="*50)
+        print(f"DEBUG - Sample Completion:\n{completions[0]}\n")
+        print(f"DEBUG - Parsed Data: Decision={decisions[0]}, Score={m_scores[0]}, FormatOK={format_scores[0]}")
+        print(f"DEBUG - Rewards: R1={r1_scaled[0]:.2f}, R2={r2[0]:.2f}, R3={r3[0]:.2f}, R4={r4[0]:.2f}, R5={r5[0]:.2f} | Total={total_rewards[0]:.2f}")
+        print("="*50 + "\n")
+            
         logs = {
             "r1": sum(r1_scaled) / batch_size,
             "r2": sum(r2) / batch_size,
