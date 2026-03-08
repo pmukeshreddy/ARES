@@ -263,7 +263,6 @@ class DAPOTrainer:
                 r3_tensor = torch.tensor(logs["r3_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r4_tensor = torch.tensor(logs["r4_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
-                r6_tensor = torch.tensor(logs["r6_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
                     """Normalize each row (group) independently: (x - mean) / (std + eps)"""
