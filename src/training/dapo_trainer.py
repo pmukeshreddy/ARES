@@ -230,6 +230,8 @@ class DAPOTrainer:
         
         lora_sync_dir = f"/tmp/lora_dapo_{team_name}"
         os.makedirs(lora_sync_dir, exist_ok=True)
+        current_lora_name = None  # Track active LoRA name for SGLang
+        lora_sync_interval = self.config.get("lora_sync_interval", 5)
         
         global_step = 0
         total_steps = max_steps
@@ -268,22 +270,28 @@ class DAPOTrainer:
             # Default to MD5 hash if example_id is missing to securely join with precomputed scores
             example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
             
-            # 1. Sync LoRA weights to disk for SGLang
-            self.model.save_pretrained(lora_sync_dir)
+            # 1. Sync LoRA weights to SGLang every N steps (avoids deadlock + faster)
+            # Use unique paths so SGLang caches by path — no unload needed
+            if step % lora_sync_interval == 0 or current_lora_name is None:
+                sync_path = f"{lora_sync_dir}_step{step}"
+                os.makedirs(sync_path, exist_ok=True)
+                self.model.save_pretrained(sync_path)
+                new_lora_name = f"lora_step{step}"
+                self.sglang.load_lora(new_lora_name, sync_path)
+                current_lora_name = new_lora_name
+                
+                # Clean up old sync dirs to avoid filling /tmp
+                if step > 0:
+                    old_path = f"{lora_sync_dir}_step{step - lora_sync_interval}"
+                    if os.path.exists(old_path):
+                        shutil.rmtree(old_path, ignore_errors=True)
             
-            # 2. Dynamically load into SGLang (or reload with updated weights)
-            try:
-                self.sglang.unload_lora("active_lora")
-            except Exception:
-                pass  # First time, nothing to unload
-            self.sglang.load_lora("active_lora", str(lora_sync_dir))
-            
-            # 3. Rollout 16 samples per prompt using SGLang (oversampling)
+            # 2. Rollout 16 samples per prompt using SGLang (oversampling)
             # completions_grouped = List of length batch_size, where each element is a list of N strings
             oversample_size = self.group_size * 2
             completions_grouped = self.sglang.generate(
                 prompts=prompts,
-                lora_path="active_lora",
+                lora_path=current_lora_name,
                 n=oversample_size,
                 max_tokens=self.config.get("max_new_tokens", 256),
                 tokenizer=self.tokenizer
