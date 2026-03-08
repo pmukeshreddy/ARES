@@ -204,11 +204,22 @@ class DAPOTrainer:
             sft_state = safetensors.torch.load_file(str(sft_warmup_path / "adapter_model.safetensors"))
             
             # Load into training model
+            # PEFT uses ".default." in key names for named adapters, but save_pretrained
+            # saves without it. Remap: lora_A.weight -> lora_A.default.weight
             model_state = self.model.state_dict()
-            for key in sft_state:
-                if key in model_state:
-                    model_state[key].copy_(sft_state[key])
-            logger.info(f"SFT warm-up weights loaded into training model for {team_name}")
+            matched = 0
+            for sft_key, sft_val in sft_state.items():
+                # Try direct match first
+                if sft_key in model_state:
+                    model_state[sft_key].copy_(sft_val)
+                    matched += 1
+                else:
+                    # Remap: insert ".default" before ".weight" in lora key
+                    remapped = sft_key.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
+                    if remapped in model_state:
+                        model_state[remapped].copy_(sft_val)
+                        matched += 1
+            logger.info(f"SFT warm-up: matched {matched}/{len(sft_state)} keys into training model for {team_name}")
             
             # Load SFT as reference model (apply LoRA to ref_model temporarily)
             from peft import PeftModel
