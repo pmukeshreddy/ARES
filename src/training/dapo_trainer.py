@@ -54,6 +54,11 @@ class SGLangBridge:
             for _ in range(n):
                 try:
                     resp = requests.post(url, json=payload).json()
+                    
+                    # DEBUG LOGGING FOR BUG 1
+                    if _ == 0:  # Only print once per prompt to avoid spam
+                        logger.info(f"SGLang raw response keys: {list(resp.keys())}, snippet: {str(resp)[:300]}")
+                        
                     completion = resp.get("text", "")
                     if isinstance(completion, list): # just in case
                         completion = completion[0] if len(completion) > 0 else ""
