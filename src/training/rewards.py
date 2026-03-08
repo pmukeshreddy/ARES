@@ -127,8 +127,8 @@ class DAPORewardScales:
         R2: Outcome Match (weight 0.35)
         SURFACE + label=1 → +1.0
         FILTER  + label=0 → +1.0
-        SURFACE + label=0 → -1.2 (noise, trust killer)
-        FILTER  + label=1 → -0.8 (missed, recoverable)
+        SURFACE + label=0 → -1.0 (noise, trust killer)
+        FILTER  + label=1 → -1.0 (missed, recoverable)
         """
         rewards = []
         for dec, label in zip(decisions, ground_truth_labels):

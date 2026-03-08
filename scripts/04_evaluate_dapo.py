@@ -51,6 +51,7 @@ def evaluate_team_lora(model_name: str, team_name: str, test_file: str, lora_pat
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
         
     logger.info(f"Loading Base Model: {model_name}...")
     base_model = AutoModelForCausalLM.from_pretrained(
