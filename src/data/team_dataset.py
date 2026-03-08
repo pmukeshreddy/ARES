@@ -117,6 +117,7 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
                     "diff": diff,
                     "comment": comment,
                     "label": team_label,
+                    "rm_score": round(rm_score, 4),
                     "team": team_name
                 }
                 team_data_surface[team_name].append(sample)
@@ -127,6 +128,7 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
                     "diff": diff,
                     "comment": comment,
                     "label": team_label,
+                    "rm_score": round(rm_score, 4),
                     "team": team_name
                 }
                 team_data_filter[team_name].append(sample)

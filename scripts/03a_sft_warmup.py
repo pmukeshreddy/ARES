@@ -39,7 +39,8 @@ def create_sft_example(item: dict, tokenizer) -> str:
     
     # Create a well-formed ideal completion
     decision = "SURFACE" if label == 1 else "FILTER"
-    score = "0.8" if label == 1 else "0.2"
+    # Fallback to hardcoded scores only for older datasets lacking rm_score
+    score = str(item.get("rm_score", 0.8 if label == 1 else 0.2))
     
     # Create a grounded reasoning trace
     if label == 1:
