@@ -241,7 +241,7 @@ class DAPOTrainer:
                     flat_completions, flat_diffs, flat_comments, flat_labels, self.config, flat_prompts
                 )
                 
-                # GDPO: Per-Reward Normalization (normalize each R1-R5 independently within each group)
+                # GDPO: Per-Reward Normalization (normalize each R1-R6 independently within each group)
                 # Then sum the normalized advantages. This prevents reward signal collapse.
                 w_r1, w_r2, w_r3, w_r4, w_r5 = logs["weights"]
                 
@@ -250,6 +250,7 @@ class DAPOTrainer:
                 r3_tensor = torch.tensor(logs["r3_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r4_tensor = torch.tensor(logs["r4_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r6_tensor = torch.tensor(logs["r6_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
                     """Normalize each row (group) independently: (x - mean) / (std + eps)"""
@@ -263,8 +264,9 @@ class DAPOTrainer:
                 adv_r3 = w_r3 * normalize_within_group(r3_tensor)
                 adv_r4 = w_r4 * normalize_within_group(r4_tensor)
                 adv_r5 = w_r5 * normalize_within_group(r5_tensor)
+                adv_r6 = normalize_within_group(r6_tensor)  # No weight — already scaled
                 
-                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
+                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5 + adv_r6
                 
                 # Check if any group has meaningful variance (at least one component varies)
                 total_std = advantages.std(dim=1)
