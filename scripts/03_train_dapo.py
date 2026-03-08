@@ -25,7 +25,7 @@ from src.training.reward_model import RewardModel
 from src.data.team_dataset import simulate_team_datasets
 from src.training.dapo_trainer import DAPOTrainer
 
-def start_sglang_server(model_name: str, port: int) -> subprocess.Popen:
+def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subprocess.Popen:
     """Starts the SGLang generation engine as a background process."""
     logger = logging.getLogger("dapo_main")
     logger.info(f"Starting SGLang server for {model_name} on port {port}...")
@@ -33,6 +33,10 @@ def start_sglang_server(model_name: str, port: int) -> subprocess.Popen:
     # We use subprocess to isolate SGLang memory from PyTorch memory safely.
     # --disable-cuda-graph is often needed for dynamic LoRAs if memory is extremely tight
     # --lora-paths allows dynamic swapping later via the API.
+    
+    lora_rank = str(dapo_config.get("lora_r", 16))
+    lora_targets = ",".join(dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"]))
+    
     cmd = [
         "python3", "-m", "sglang.launch_server",
         "--model-path", model_name,
@@ -40,6 +44,8 @@ def start_sglang_server(model_name: str, port: int) -> subprocess.Popen:
         "--trust-remote-code",
         # Enable dynamic LoRA reloading during runtime
         "--enable-lora",
+        "--max-lora-rank", lora_rank,
+        "--lora-target-modules", lora_targets,
         # Limit memory to 50% so PyTorch has space for training
         "--mem-fraction-static", "0.5",
         # For H100
@@ -135,7 +141,7 @@ def main():
     # 3B coder instruct base
     base_model_name = dapo_config.get("model_name", "Qwen/Qwen2.5-Coder-3B-Instruct")
     
-    sglang_process = start_sglang_server(base_model_name, args.sglang_port)
+    sglang_process = start_sglang_server(base_model_name, args.sglang_port, dapo_config)
     
     try:
         # 4. Initialize Trainer
