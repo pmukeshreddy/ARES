@@ -119,13 +119,14 @@ def sft_warmup_team(model, tokenizer, team_name: str, train_file: str, device: s
 
 
 def main():
-    with open("configs/default.yaml", "r") as f:
+    PROJECT_ROOT = Path(__file__).parent.parent
+    with open(PROJECT_ROOT / "configs/default.yaml", "r") as f:
         config = yaml.safe_load(f)
     
     dapo_config = config["dapo"]
     model_name = dapo_config["model_name"]
-    teams_dir = Path("data/teams")
-    output_dir = Path("checkpoints/sft_warmup")
+    teams_dir = PROJECT_ROOT / "data/teams"
+    output_dir = PROJECT_ROOT / "checkpoints/sft_warmup"
     output_dir.mkdir(parents=True, exist_ok=True)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -135,7 +136,7 @@ def main():
         logger.info("Simulated team data not found, generating now using Reward Model for labels...")
         
         # Load RM
-        rm_path = Path("checkpoints/reward_model/best")
+        rm_path = PROJECT_ROOT / "checkpoints/reward_model/best"
         if not rm_path.exists():
             logger.error(f"Phase 1 RM checkpoint not found at {rm_path}")
             sys.exit(1)
@@ -144,7 +145,7 @@ def main():
         rm_model = rm_model.to(device)
         rm_model.eval()
         
-        processed_dir = Path(config["data"]["processed_dir"])
+        processed_dir = PROJECT_ROOT / config["data"]["processed_dir"]
         base_data = processed_dir / "train.jsonl"
         if (processed_dir / "train_small.jsonl").exists():
             base_data = processed_dir / "train_small.jsonl"
