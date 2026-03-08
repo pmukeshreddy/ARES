@@ -165,21 +165,21 @@ class DAPORewardScales:
                 rm_scores.extend(probs)
         return rm_scores
 
-    def compute_r3_calibration(self, model_scores: list, ground_truth_labels: list) -> list:
+    def compute_r3_rm_agreement(self, decisions: list, diffs: list, comments: list) -> list:
         """
-        R3: Calibration (weight 0.05)
-        Compares model's <score> against the ground truth label (0 or 1).
-        This avoids the bias from the reward model's naturally low outputs.
+        R3: RM Agreement (weight 0.10)
+        Compares DAPO model's decision against Phase 1 RM's binary prediction.
+        Transfers the RM's F1=0.99 classification knowledge into DAPO training.
         """
+        rm_scores = self._get_rm_scores(diffs, comments)
+        
         rewards = []
-        for m_score, label in zip(model_scores, ground_truth_labels):
-            if m_score is not None:
-                target = float(label)  # 0.0 or 1.0
-                diff = abs(m_score - target)
-                r = 1.0 - (2.0 * diff)  # Perfect match = +1.0, max error = -1.0
+        for dec, rm_score in zip(decisions, rm_scores):
+            rm_decision = "SURFACE" if rm_score > 0.5 else "FILTER"
+            if dec == rm_decision:
+                rewards.append(1.0)   # Agrees with F1=0.99 RM
             else:
-                r = -1.0
-            rewards.append(r)
+                rewards.append(-0.5)  # Disagrees (softer penalty — team context may override RM)
         return rewards
 
     def compute_r4_format(self, format_scores: list) -> list:
@@ -265,8 +265,8 @@ class DAPORewardScales:
         # R2
         r2 = self.compute_r2_outcome_match(decisions, labels)
         
-        # R3: Calibration against ground truth labels (not reward model)
-        r3 = self.compute_r3_calibration(m_scores, labels)
+        # R3: RM Agreement (transfers Phase 1 F1=0.99 knowledge)
+        r3 = self.compute_r3_rm_agreement(decisions, diffs, comments)
         
         # R4
         r4 = self.compute_r4_format(format_scores)
