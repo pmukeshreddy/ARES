@@ -184,34 +184,7 @@ class DAPORewardScales:
                 rewards.append(penalty)
         return rewards
     
-    def compute_r6_exploration(self, decisions: list) -> list:
-        """
-        R6: Exploration Bonus (not weighted — applied directly in GDPO).
-        When FILTER dominates the batch, reward SURFACE decisions and penalize FILTER
-        to create intra-group variance for GDPO gradient signal.
-        Without this, all-FILTER groups produce zero R2 variance → no learning.
-        """
-        surface_count = sum(1 for d in decisions if d == "SURFACE")
-        surface_ratio = surface_count / max(1, len(decisions))
-        
-        rewards = []
-        for dec in decisions:
-            if surface_ratio < 0.30:
-                # Heavily dominated by FILTER — boost exploration
-                if dec == "SURFACE":
-                    rewards.append(2.0)
-                else:
-                    rewards.append(-0.5)
-            elif surface_ratio > 0.70:
-                # Heavily dominated by SURFACE — boost FILTER exploration
-                if dec == "FILTER":
-                    rewards.append(2.0)
-                else:
-                    rewards.append(-0.5)
-            else:
-                # Balanced — no exploration bonus needed
-                rewards.append(0.0)
-        return rewards
+
         
     def compute_total_reward(self, 
                              completions: list, 
@@ -251,9 +224,6 @@ class DAPORewardScales:
         # R5 (DAPO Overlong Penalty)
         r5 = self.compute_r5_overlong_penalty(completions)
         
-        # R6 (Exploration bias)
-        r6 = self.compute_r6_exploration(decisions)
-        
         # Get weights
         if config is not None:
             w_r1 = config.get("r1_weight", 0.20)
@@ -267,13 +237,13 @@ class DAPORewardScales:
         # Total (weighted sum, used for logging only; GDPO normalizes per-component in trainer)
         total_rewards = []
         for i in range(batch_size):
-            total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i]) + r6[i]
+            total = (w_r1 * r1_scaled[i]) + (w_r2 * r2[i]) + (w_r3 * r3[i]) + (w_r4 * r4[i]) + (w_r5 * r5[i])
             total_rewards.append(total)
             
         print("\n" + "="*50)
         print(f"DEBUG - Sample Completion:\n{completions[0]}\n")
         print(f"DEBUG - Parsed Data: Decision={decisions[0]}, Score={m_scores[0]}, FormatOK={format_scores[0]}")
-        print(f"DEBUG - Rewards: R1={r1_scaled[0]:.2f}, R2={r2[0]:.2f}, R3={r3[0]:.2f}, R4={r4[0]:.2f}, R5={r5[0]:.2f}, R6={r6[0]:.2f} | Total={total_rewards[0]:.2f}")
+        print(f"DEBUG - Rewards: R1={r1_scaled[0]:.2f}, R2={r2[0]:.2f}, R3={r3[0]:.2f}, R4={r4[0]:.2f}, R5={r5[0]:.2f} | Total={total_rewards[0]:.2f}")
         print("="*50 + "\n")
             
         logs = {
@@ -282,7 +252,6 @@ class DAPORewardScales:
             "r3": sum(r3) / batch_size,
             "r4": sum(r4) / batch_size,
             "r5_penalty": sum(r5) / batch_size,
-            "r6_bonus": sum(r6) / batch_size,
             "total_reward": sum(total_rewards) / batch_size,
             "valid_format_ratio": sum(1 for p in format_scores if p == 1.0) / batch_size,
             # Per-component raw lists for GDPO normalization in trainer
@@ -291,7 +260,6 @@ class DAPORewardScales:
             "r3_raw": r3,
             "r4_raw": r4,
             "r5_raw": r5,
-            "r6_raw": r6,
             "weights": [w_r1, w_r2, w_r3, w_r4, w_r5],
         }
         

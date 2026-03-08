@@ -318,7 +318,6 @@ class DAPOTrainer:
                 r3_tensor = torch.tensor(logs["r3_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r4_tensor = torch.tensor(logs["r4_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
-                r6_tensor = torch.tensor(logs["r6_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
                     """Normalize each row (group) independently: (x - mean) / (std + eps)"""
@@ -332,15 +331,17 @@ class DAPOTrainer:
                 adv_r3 = normalize_within_group(r3_tensor) * w_r3
                 adv_r4 = normalize_within_group(r4_tensor) * w_r4
                 adv_r5 = normalize_within_group(r5_tensor) * w_r5
-                adv_r6 = normalize_within_group(r6_tensor) # R6 has no explicit config weight
                 
-                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5 + adv_r6
+                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
+                
+                # Batch-wise normalization for final scaling stability
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
                 
                 # Dynamic sampling: replace the top/bottom 25% filtering with true DAPO variance check
                 valid_groups = []
-                for g_idx in range(r2_tensor.size(0)):
-                    # Check if all completions got exact same R2
-                    if r2_tensor[g_idx].std() < 1e-5:
+                for g_idx in range(advantages.size(0)):
+                    # Check if total advantage has zero variance in this group
+                    if advantages[g_idx].std() < 1e-5:
                         valid_groups.append(False)
                     else:
                         valid_groups.append(True)

@@ -77,13 +77,19 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
     # Use up to 300 samples for SFT warm-up to deeply bake in the score calibration
     raw_dataset = random.sample(full_dataset, min(300, len(full_dataset)))
     
+    missing_scores = 0
     dataset = []
     for item in raw_dataset:
         diff = item.get("diff", "")
         comment = item.get("comment", "")
         ex_id = item.get("example_id", hashlib.md5(f"{diff}_{comment}".encode('utf-8')).hexdigest())
         
-        score = precomputed_scores.get(ex_id, 0.5)
+        if ex_id in precomputed_scores:
+            score = precomputed_scores[ex_id]
+        else:
+            score = 0.5
+            missing_scores += 1
+            
         label = 1 if score >= threshold else 0
         prompt = generate_prompt(diff, comment, team_name)
         
@@ -94,6 +100,9 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
             "comment": comment,
             "score": score
         })
+        
+    if missing_scores > 0:
+        logger.warning(f"SFT Warmup: {missing_scores} out of {len(raw_dataset)} samples missing from precomputed scores. (Fallback to 0.5 applied)")
         
     logger.info(f"Using {len(dataset)} samples for SFT warm-up")
     
