@@ -98,7 +98,7 @@ class DAPORewardScales:
             think_words = set(re.findall(r'\b[a-z]{5,}\b', think_lower))
             overlap_diff = len(diff_words.intersection(think_words))
             
-            if overlap_diff < 6:
+            if overlap_diff < 3:
                 # Hallucinated reasoning, doesn't actually discuss the code
                 rewards.append(-0.5)
                 continue
@@ -113,8 +113,8 @@ class DAPORewardScales:
             # Continuous reward based on groundedness (capped at 10 overlapping significant words)
             overlap_score = min(1.0, overlap_diff / 10.0)
             
-            # Continuous reward based on length (sweet spot up to 300 chars, R5 penalizes > 800)
-            len_score = min(1.0, len(think) / 300.0)
+            # Continuous reward based on length (sweet spot up to 150 chars, R5 penalizes > 400)
+            len_score = min(1.0, len(think) / 150.0)
             
             # Final R1 score is a blend of groundedness and sufficient length
             r = (overlap_score * 0.7) + (len_score * 0.3)
@@ -127,8 +127,8 @@ class DAPORewardScales:
         R2: Outcome Match (weight 0.35)
         SURFACE + label=1 → +1.0
         FILTER  + label=0 → +1.0
-        SURFACE + label=0 → -2.0 (noise, trust killer)
-        FILTER  + label=1 → -0.5 (missed, recoverable)
+        SURFACE + label=0 → -1.2 (noise, trust killer)
+        FILTER  + label=1 → -0.8 (missed, recoverable)
         """
         rewards = []
         for dec, label in zip(decisions, ground_truth_labels):
@@ -188,19 +188,19 @@ class DAPORewardScales:
         """
         R5: Overlong Penalty (weight 0.20)
         DAPO specific feature to penalize bloated reasoning traces.
-        If length > 800 characters, apply progressive negative penalty.
-        Max penalty of -1.0 at 1800 characters.
+        If length > 400 characters, apply progressive negative penalty.
+        Max penalty of -1.0 at 1000 characters.
         """
         rewards = []
         for text in completions:
             length = len(text)
-            if length < 800:
+            if length < 400:
                 rewards.append(0.0)
-            elif length > 1800:
+            elif length > 1000:
                 rewards.append(-1.0)
             else:
                 # Linearly interpolate between 0.0 and -1.0
-                penalty = -((length - 800) / 1000.0)
+                penalty = -((length - 400) / 600.0)
                 rewards.append(penalty)
         return rewards
         
