@@ -75,9 +75,17 @@ def evaluate_team_lora(model_name: str, team_name: str, test_file: str, lora_pat
     with torch.no_grad():
         for i in tqdm(range(0, len(dataset), batch_size), desc=f"Evaluating {team_name}"):
             batch = dataset[i:i+batch_size]
-            prompts = [item["prompt"] for item in batch]
             
-            inputs = tokenizer(prompts, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(model.device)
+            chat_prompts = []
+            for item in batch:
+                messages = [
+                    {"role": "system", "content": "You are a helpful AI code reviewer."},
+                    {"role": "user", "content": item["prompt"]}
+                ]
+                formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                chat_prompts.append(formatted)
+                
+            inputs = tokenizer(chat_prompts, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(model.device)
             
             # Generate
             outputs = model.generate(
