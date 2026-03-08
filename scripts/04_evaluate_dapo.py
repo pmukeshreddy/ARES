@@ -25,14 +25,14 @@ from src.training.rewards import parse_completion
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-def evaluate_team_lora(model_name: str, team_name: str, test_file: str, lora_path: str, max_samples: int = 100):
+def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_samples: int = 100):
     """Evaluates a single team's LoRA adapter on its test dataset."""
     logger.info(f"\n{'='*50}\nEvaluating team: {team_name}\n{'='*50}")
     
     # 1. Load Data
     if not os.path.exists(test_file):
         logger.error(f"Test file not found: {test_file}")
-        return None
+        return None, None
         
     dataset = []
     with open(test_file, "r") as f:
@@ -42,36 +42,15 @@ def evaluate_team_lora(model_name: str, team_name: str, test_file: str, lora_pat
     # Limit samples for quicker evaluation
     dataset = dataset[:max_samples]
     if len(dataset) == 0:
-        return None
+        return None, None
         
     logger.info(f"Loaded {len(dataset)} test samples for {team_name}")
     
-    # 2. Load Model & Tokenizer
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-        
-    logger.info(f"Loading Base Model: {model_name}...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto" if device == "cuda" else None
-    )
-    
-    if os.path.exists(lora_path):
-        logger.info(f"Loading LoRA weights from {lora_path}...")
-        model = PeftModel.from_pretrained(base_model, lora_path)
-    else:
-        logger.warning(f"LoRA weights not found at {lora_path}. Using base model.")
-        model = base_model
-        
     model.eval()
     
     # 3. Generate Predictions
     results = []
-    batch_size = 4
+    batch_size = 16  # Increased batch size for non-sequential faster evaluation
     
     with torch.no_grad():
         for i in tqdm(range(0, len(dataset), batch_size), desc=f"Evaluating {team_name}"):
@@ -158,6 +137,22 @@ def main():
     
     all_metrics = []
     
+    # Load Base Model & Tokenizer ONCE
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+        
+    logger.info(f"Loading Base Model: {model_name}...")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,
+        device_map="auto" if device == "cuda" else None
+    )
+    
+    model = None
+    
     # Process each team
     for team_dir in teams_dir.iterdir():
         if not team_dir.is_dir():
@@ -167,7 +162,19 @@ def main():
         test_file = str(team_dir / "test.jsonl")
         lora_path = str(checkpoints_dir / f"dapo_lora_{team_name}")
         
-        metrics, results = evaluate_team_lora(model_name, team_name, test_file, lora_path, max_samples=50)
+        # Load adapter into the base model dynamically
+        if os.path.exists(lora_path):
+            logger.info(f"Loading LoRA weights from {lora_path} for {team_name}...")
+            if model is None:
+                model = PeftModel.from_pretrained(base_model, lora_path, adapter_name=team_name)
+            else:
+                model.load_adapter(lora_path, adapter_name=team_name)
+                model.set_adapter(team_name)
+        else:
+            logger.warning(f"LoRA weights not found at {lora_path}. Using base model.")
+            model = base_model
+            
+        metrics, results = evaluate_team_lora(model, tokenizer, team_name, test_file, max_samples=50)
         
         if metrics:
             all_metrics.append(metrics)
