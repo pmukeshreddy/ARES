@@ -29,7 +29,6 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
 from trl import SFTTrainer
-import requests
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -215,8 +214,7 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         logging_steps=10,
         warmup_ratio=0.05,
         bf16=True,
-        save_strategy="no",
-        remove_unused_columns=False
+        save_strategy="no"
     )
     
     trainer = SFTTrainer(
