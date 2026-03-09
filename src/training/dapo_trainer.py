@@ -293,25 +293,13 @@ class DAPOTrainer:
             used_prompt_hashes = set()    # Track which prompts we've already tried
             
             for resample_round in range(max_resample_times + 1):
-                # Sample a fresh batch of prompts
-                num_labeled = min(batch_size // 2, len(train_dataset))
-                labeled_batch = random.sample(train_dataset, num_labeled)
-                for item in labeled_batch:
+                # Use ONLY labeled data for DAPO training.
+                # Unlabeled samples get R2=0 for ALL completions, contributing
+                # only R1/R3 noise that dilutes the labeled R2 gradient signal.
+                num_labeled = min(batch_size, len(train_dataset))
+                batch = random.sample(train_dataset, num_labeled)
+                for item in batch:
                     item["has_label"] = True
-                    
-                unlabeled_batch = []
-                if len(self.unlabeled_dataset) > 0:
-                    samples_needed = batch_size - len(labeled_batch)
-                    unlabeled_samples = random.sample(self.unlabeled_dataset, min(samples_needed, len(self.unlabeled_dataset)))
-                    for item in unlabeled_samples:
-                        if "prompt" not in item:
-                            from src.data.team_dataset import generate_prompt
-                            item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
-                        item["has_label"] = False
-                        item["label"] = 0
-                        unlabeled_batch.append(item)
-                        
-                batch = labeled_batch + unlabeled_batch
                 
                 prompts = [item["prompt"] for item in batch]
                 diffs = [item["diff"] for item in batch]
@@ -321,13 +309,12 @@ class DAPOTrainer:
                 example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
                 
                 # DEBUG: Show batch composition
-                labeled_labels = [l for l, h in zip(labels, has_label) if h]
-                n_surface_gt = sum(1 for l in labeled_labels if l == 1)
-                n_filter_gt = sum(1 for l in labeled_labels if l == 0)
+                n_surface_gt = sum(1 for l in labels if l == 1)
+                n_filter_gt = sum(1 for l in labels if l == 0)
                 print(f"\n{'='*60}")
                 print(f"DEBUG STEP {step} (resample round {resample_round}):")
-                print(f"  Batch: {len(batch)} total, {sum(has_label)} labeled, {len(batch)-sum(has_label)} unlabeled")
-                print(f"  Ground truth (labeled only): {n_surface_gt} SURFACE / {n_filter_gt} FILTER")
+                print(f"  Batch: {len(batch)} all labeled")
+                print(f"  Ground truth: {n_surface_gt} SURFACE / {n_filter_gt} FILTER")
                 
                 # 2. Rollout N completions per prompt using SGLang
                 completions_grouped = self.sglang.generate(
