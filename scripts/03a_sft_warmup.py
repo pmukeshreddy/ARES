@@ -40,18 +40,26 @@ def create_sft_example(item: dict, tokenizer) -> str:
     decision = "SURFACE" if label == 1 else "FILTER"
     score = item.get("score", 0.5)
     
-    # Create a grounded reasoning trace
+    # Create a grounded reasoning trace that argues both sides (matches new prompt instruction)
     if label == 1:
         reasoning = (
-            f"The review comment addresses a specific concern related to the code changes in the diff. "
-            f"Based on the team's stated priorities, this type of feedback aligns with what they care about. "
-            f"The comment provides actionable insight that the team would benefit from seeing."
+            f"Let me consider both sides. "
+            f"Reasons this might NOT be relevant: the comment could be seen as a minor suggestion "
+            f"rather than a critical issue. "
+            f"However, reasons this IS relevant: looking at the code changes and the comment's content, "
+            f"this touches on a concern that aligns with what the team cares about — it could affect "
+            f"correctness, reliability, or the team's stated priorities. "
+            f"On balance, this comment provides value the team should see."
         )
     else:
         reasoning = (
-            f"The review comment does not align with the team's stated priorities. "
-            f"While the comment may have some merit, this team explicitly focuses on different aspects "
-            f"of code quality. Filtering this comment would reduce noise for the team."
+            f"Let me consider both sides. "
+            f"Reasons this might be relevant: the comment does point out something in the code "
+            f"that could be improved. "
+            f"However, reasons this is NOT relevant: the specific concern raised doesn't align "
+            f"with what this team prioritizes — it falls outside their stated focus areas. "
+            f"The team would likely consider this noise rather than actionable feedback. "
+            f"On balance, filtering this comment would reduce noise for the team."
         )
     
     ideal_completion = f"<think>\n{reasoning}\n</think>\n<score>{score:.4f}</score>\n<decision>{decision}</decision>"

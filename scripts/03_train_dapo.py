@@ -150,6 +150,11 @@ def main():
             # Load dataset
             with open(team_train_path, "r") as f:
                 train_data = [json.loads(line) for line in f]
+            
+            # Regenerate prompts from current template (ensures new prompt design is used)
+            from src.data.team_dataset import generate_prompt
+            for item in train_data:
+                item["prompt"] = generate_prompt(item["diff"], item["comment"], team)
                 
             logger.info(f"Team {team} dataset loaded: {len(train_data)} samples.")
             trainer.train_team(team, train_data)

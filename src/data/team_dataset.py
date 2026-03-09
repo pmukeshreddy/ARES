@@ -10,24 +10,49 @@ logger = logging.getLogger(__name__)
 # 5 Simulated Teams
 TEAM_PROFILES = {
     "Pragmatic-Shippers": {
-        "context": "We are an early-stage startup team. We only care about catastrophic bugs, logic errors that break the app, or complete architectural failures. We ignore everything else to ship faster.",
-        "rm_threshold": 0.85  # Only surface extremely actionable/critical items
+        "context": (
+            "We are an early-stage startup team that ships fast. "
+            "We prioritize catastrophic bugs, logic errors that could break the app, "
+            "and architectural failures. We also care about correctness issues, "
+            "missing edge cases, potential data loss, and subtle bugs that could "
+            "cause production incidents — even if the comment seems minor at first glance. "
+            "We tend to skip purely stylistic feedback or minor refactoring suggestions."
+        ),
+        "rm_threshold": 0.85
     },
     "Thorough-Mentors": {
-        "context": "We are an open-source maintainer team. We care about teaching. We surface all suggestions, alternative approaches, design patterns, and edge cases.",
-        "rm_threshold": 0.30  # Surface almost everything that has any utility
+        "context": (
+            "We are an open-source maintainer team focused on teaching and community growth. "
+            "We surface suggestions, alternative approaches, design patterns, edge cases, "
+            "and anything that could help contributors learn. We are generous with feedback."
+        ),
+        "rm_threshold": 0.30
     },
     "Security-First": {
-        "context": "We are a high-security backend team. We care deeply about vulnerabilities, SQL injection, buffer overflows, and input validation. We ignore style nits.",
-        "rm_threshold": 0.70  # High bar, but not as extreme as pragmatic
+        "context": (
+            "We are a high-security backend team. We prioritize vulnerabilities, "
+            "SQL injection, buffer overflows, input validation, and auth issues. "
+            "We also care about data leaks and unsafe defaults. "
+            "We tend to skip purely stylistic comments."
+        ),
+        "rm_threshold": 0.70
     },
     "Performance-Obsessed": {
-        "context": "We are a low-latency trading systems team. We care about O(N) complexity, memory allocations, caching, and CPU cycles. We ignore minor refactoring unless it speeds up code.",
+        "context": (
+            "We are a low-latency trading systems team. We prioritize O(N) complexity, "
+            "memory allocations, caching, and CPU cycles. We also care about "
+            "unnecessary copies, lock contention, and GC pressure. "
+            "We tend to skip minor refactoring unless it improves performance."
+        ),
         "rm_threshold": 0.65
     },
     "Style-Sticklers": {
-        "context": "We are a frontend foundational UI team. Consistency is god. We care about naming conventions, strict typing, linting rules, formatting, and documentation.",
-        "rm_threshold": 0.50  # Average bar
+        "context": (
+            "We are a frontend foundational UI team. Consistency is paramount. "
+            "We care about naming conventions, strict typing, linting rules, "
+            "formatting, and documentation. We surface most feedback."
+        ),
+        "rm_threshold": 0.50
     }
 }
 
@@ -41,12 +66,15 @@ def generate_prompt(diff: str, comment: str, team_name: str) -> str:
     context = TEAM_PROFILES[canonical]["context"]
     
     prompt = (
-        f"You are an AI code reviewer acting as a filter for a specific engineering team.\n\n"
+        f"You are an AI code review routing assistant. Your job is to decide "
+        f"whether a review comment is relevant enough for a specific engineering team to see.\n\n"
         f"<team_context>\n{context}\n</team_context>\n\n"
         f"Below is a code diff and a proposed review comment.\n"
         f"<diff>\n{diff[:1500]}\n</diff>\n\n"
         f"<comment>\n{comment}\n</comment>\n\n"
-        f"Analyze if this team would care about this comment. "
+        f"Decide whether to SURFACE (show to the team) or FILTER (hide from the team).\n"
+        f"In your reasoning, consider BOTH why this comment might be relevant to the team "
+        f"AND why it might not be. Then make your final call.\n\n"
         f"Output your reasoning inside <think> tags, followed by a probability score between 0.0 and 1.0 in <score> tags, "
         f"and finally your decision (<decision>SURFACE</decision> or <decision>FILTER</decision>).\n"
     )

@@ -261,6 +261,57 @@ class DAPOTrainer:
         import random
         import hashlib
         
+        # ── SFT Baseline Eval ────────────────────────────────
+        # Generate completions from the SFT warmup weights to verify
+        # balanced starting point before DAPO training begins.
+        sft_eval_size = min(20, len(train_dataset))
+        sft_eval_batch = random.sample(train_dataset, sft_eval_size)
+        sft_eval_prompts = [item["prompt"] for item in sft_eval_batch]
+        sft_eval_labels = [item["label"] for item in sft_eval_batch]
+        
+        # Sync initial SFT weights to SGLang for eval
+        sync_path = f"{lora_sync_dir}_step0"
+        os.makedirs(sync_path, exist_ok=True)
+        self.model.save_pretrained(sync_path)
+        sft_lora_name = f"{team_name}_step0"
+        self.sglang.load_lora(sft_lora_name, sync_path)
+        current_lora_name = sft_lora_name
+        
+        sft_eval_completions = self.sglang.generate(
+            prompts=sft_eval_prompts, lora_path=sft_lora_name,
+            n=1, max_tokens=self.config.get("max_new_tokens", 256),
+            tokenizer=self.tokenizer
+        )
+        
+        from src.training.rewards import parse_completion
+        sft_decisions = [parse_completion(c[0])["decision"] if c else None for c in sft_eval_completions]
+        sft_n_surface = sum(1 for d in sft_decisions if d == "SURFACE")
+        sft_n_filter = sum(1 for d in sft_decisions if d == "FILTER")
+        sft_n_other = sum(1 for d in sft_decisions if d not in ("SURFACE", "FILTER"))
+        gt_surface = sum(1 for l in sft_eval_labels if l == 1)
+        gt_filter = sum(1 for l in sft_eval_labels if l == 0)
+        
+        print(f"\n{'='*60}")
+        print(f"SFT BASELINE EVAL ({sft_eval_size} prompts, 1 completion each):")
+        print(f"  Ground truth:  {gt_surface} SURFACE / {gt_filter} FILTER")
+        print(f"  SFT outputs:   {sft_n_surface} SURFACE ({100*sft_n_surface/sft_eval_size:.0f}%) / "
+              f"{sft_n_filter} FILTER ({100*sft_n_filter/sft_eval_size:.0f}%) / {sft_n_other} invalid")
+        
+        # Show per-sample breakdown
+        correct = 0
+        for i in range(sft_eval_size):
+            gt = "SURFACE" if sft_eval_labels[i] == 1 else "FILTER"
+            pred = sft_decisions[i] or "INVALID"
+            match = "✓" if pred == gt else "✗"
+            if pred == gt:
+                correct += 1
+            if i < 10:  # Show first 10
+                print(f"    [{match}] GT={gt:7s} Pred={pred}")
+        if sft_eval_size > 10:
+            print(f"    ... ({sft_eval_size - 10} more)")
+        print(f"  Accuracy: {correct}/{sft_eval_size} ({100*correct/sft_eval_size:.0f}%)")
+        print(f"{'='*60}\n")
+        
         for step in tqdm(range(max_steps), desc=f"Team {team_name} Training"):
             
             # 1. Sync LoRA weights to SGLang every N steps (avoids deadlock + faster)
