@@ -7,7 +7,6 @@ build/
 
 # Data (large files, download locally)
 /data/
-/checkpoints/
 
 # Environment
 .venv/
