@@ -127,16 +127,16 @@ def main():
         teams = all_teams
     logger.info(f"Training {len(teams)} teams: {', '.join(teams)}")
     
-    # 2. Initialize Trainer (creates base model)
-    logger.info("Initializing DAPO trainer base model and LoRA adapter...")
-    trainer = DAPOTrainer(config)
-    
-    # 3. Start SGLang Subprocess
+    # 2. Start SGLang Subprocess FIRST (before PyTorch reserves all VRAM)
     dapo_config = config.get("dapo", {})
     config.setdefault("dapo", {})["sglang_port"] = args.sglang_port
     base_model_name = dapo_config.get("model_name", "Qwen/Qwen2.5-Coder-3B-Instruct")
     
     sglang_process = start_sglang_server(base_model_name, args.sglang_port, dapo_config)
+    
+    # 3. Initialize Trainer (creates base model)
+    logger.info("Initializing DAPO trainer base model and LoRA adapter...")
+    trainer = DAPOTrainer(config)
     
     try:
         
