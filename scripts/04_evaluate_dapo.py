@@ -40,16 +40,23 @@ def get_tokenizer(model_name):
 
 
 def kill_existing_sglang():
-    """Kill any existing SGLang server on our port."""
+    """Kill any existing SGLang server on our port — forcefully."""
+    logger.info("Killing any existing SGLang processes...")
+    # Kill by process name
+    subprocess.run(["pkill", "-9", "-f", "sglang.launch_server"], capture_output=True)
+    # Kill by port
+    subprocess.run(f"fuser -k {SGLANG_PORT}/tcp", shell=True, capture_output=True)
+    time.sleep(5)
+    
+    # Verify port is free
     try:
-        # Check if anything is running on the port
         resp = requests.get(f"{SGLANG_URL}/health", timeout=2)
         if resp.status_code == 200:
-            logger.info("Found existing SGLang server, killing it...")
-            subprocess.run(["pkill", "-f", "sglang.launch_server"], capture_output=True)
-            time.sleep(3)
+            logger.warning("Server STILL running after kill! Trying again...")
+            subprocess.run(["pkill", "-9", "-f", "sglang"], capture_output=True)
+            time.sleep(5)
     except Exception:
-        pass  # No server running, that's fine
+        logger.info("Port is free.")
 
 
 def start_sglang_server(model_name: str, dapo_config: dict):
@@ -105,12 +112,16 @@ def load_lora(adapter_name: str, lora_path: str):
     """Load a LoRA adapter into SGLang and verify it loaded."""
     url = f"{SGLANG_URL}/load_lora"
     payload = {"lora_name": adapter_name, "lora_path": lora_path}
+    logger.info(f"Loading LoRA '{adapter_name}' from {lora_path}")
     resp = requests.post(url, json=payload)
-    resp_data = resp.json()
-    success = resp_data.get("success", False)
-    logger.info(f"LoRA load '{adapter_name}' -> success={success}, loaded={list(resp_data.get('loaded_adapters', {}).keys())}")
+    logger.info(f"LoRA response [{resp.status_code}]: {resp.text[:500]}")
+    try:
+        resp_data = resp.json()
+        success = resp_data.get("success", False)
+    except Exception:
+        success = False
     if not success:
-        logger.error(f"LoRA load FAILED: {resp_data.get('error_message', 'unknown')}")
+        logger.error(f"LoRA load FAILED!")
     return success
 
 
