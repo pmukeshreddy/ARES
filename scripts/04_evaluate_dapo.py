@@ -73,12 +73,12 @@ def start_sglang_server(model_name: str, dapo_config: dict):
     cmd = [
         sglang_python, "-m", "sglang.launch_server",
         "--model-path", model_name,
-        "--port", str(SGLANG_PORT),
         "--trust-remote-code",
         "--enable-lora",
         "--max-lora-rank", lora_rank,
         "--max-loras-per-batch", "2",
         "--lora-target-modules"
+    ] + lora_targets + [
         "--mem-fraction-static", "0.4",
         "--dtype", "bfloat16"
     ]
