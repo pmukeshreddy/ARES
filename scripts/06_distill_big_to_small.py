@@ -238,7 +238,7 @@ def main():
     parser = argparse.ArgumentParser(description="RLCR: Big Model -> Small Model Knowledge Distillation")
     parser.add_argument("--teacher", default="Qwen/Qwen2.5-Coder-14B-Instruct", help="Massive Model")
     parser.add_argument("--student", default="Qwen/Qwen2.5-Coder-3B-Instruct", help="Tiny Fast Model")
-    parser.add_argument("--unlabeled-data", default="data/unlabeled_pairs.json", help="Raw coding data diffs")
+    parser.add_argument("--unlabeled-data", default="data/teams/pragmatic_shippers/train.jsonl", help="Raw coding data diffs")
     parser.add_argument("--teacher-lora", default=None, help="The heavily optimized 14B DAPO LoRA weights")
     args = parser.parse_args()
     
