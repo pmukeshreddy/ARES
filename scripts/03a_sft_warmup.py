@@ -111,11 +111,28 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
         
     if missing_scores > 0:
         logger.warning(f"SFT Warmup: {missing_scores} out of {len(raw_dataset)} samples missing from precomputed scores. (Fallback to 0.5 applied)")
+    
+    # DEBUG: Show training data composition
+    n_surface_train = sum(1 for d in dataset if d["label"] == 1)
+    n_filter_train = sum(1 for d in dataset if d["label"] == 0)
+    print(f"\n{'='*60}")
+    print(f"SFT TRAINING DATA for {team_name}:")
+    print(f"  {len(dataset)} samples: {n_surface_train} SURFACE ({100*n_surface_train/len(dataset):.0f}%) / {n_filter_train} FILTER ({100*n_filter_train/len(dataset):.0f}%)")
+    print(f"  Threshold: {threshold}")
+    # Show a sample of what the ideal completions look like
+    for i, item in enumerate(dataset[:2]):
+        _, comp = create_sft_example(item, tokenizer)
+        label = "SURFACE" if item["label"] == 1 else "FILTER"
+        print(f"  Example [{label}]: {comp[:200]}...")
+    print(f"{'='*60}\n")
         
     logger.info(f"Using {len(dataset)} samples for SFT warm-up")
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     model.train()
+    
+    # Prepare eval subset for per-epoch debugging
+    eval_subset = random.sample(dataset, min(20, len(dataset)))
     
     for epoch in range(num_epochs):
         total_loss = 0.0
@@ -152,6 +169,62 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
         
         avg_loss = total_loss / len(dataset)
         logger.info(f"SFT Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
+        
+        # ── Per-Epoch Eval ──────────────────────────────────
+        model.eval()
+        import re
+        correct = 0
+        n_surface_pred = 0
+        n_filter_pred = 0
+        n_invalid = 0
+        example_outputs = []
+        
+        with torch.no_grad():
+            for item in eval_subset:
+                prompt_text, _ = create_sft_example(item, tokenizer)
+                inputs = tokenizer(prompt_text, truncation=True, max_length=1536, return_tensors="pt").to(device)
+                
+                gen_ids = model.generate(
+                    inputs.input_ids, 
+                    attention_mask=inputs.attention_mask,
+                    max_new_tokens=256,
+                    do_sample=True,
+                    temperature=1.0,
+                    top_p=0.95,
+                    pad_token_id=tokenizer.eos_token_id
+                )
+                gen_text = tokenizer.decode(gen_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+                
+                # Parse decision
+                dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL)
+                pred = dec_match.group(1).strip().upper() if dec_match else None
+                gt = "SURFACE" if item["label"] == 1 else "FILTER"
+                
+                if pred == "SURFACE":
+                    n_surface_pred += 1
+                elif pred == "FILTER":
+                    n_filter_pred += 1
+                else:
+                    n_invalid += 1
+                    
+                if pred == gt:
+                    correct += 1
+                    
+                if len(example_outputs) < 3:
+                    example_outputs.append((gt, pred, gen_text[:250]))
+        
+        total_eval = len(eval_subset)
+        print(f"\n{'='*60}")
+        print(f"SFT EVAL after Epoch {epoch+1}/{num_epochs} (loss={avg_loss:.4f}):")
+        print(f"  Predictions: {n_surface_pred} SURFACE ({100*n_surface_pred/total_eval:.0f}%) / "
+              f"{n_filter_pred} FILTER ({100*n_filter_pred/total_eval:.0f}%) / {n_invalid} invalid")
+        print(f"  Accuracy: {correct}/{total_eval} ({100*correct/total_eval:.0f}%)")
+        for gt, pred, text in example_outputs:
+            match = "✓" if pred == gt else "✗"
+            print(f"  [{match}] GT={gt:7s} Pred={pred or 'NONE':7s} | {text}")
+        print(f"{'='*60}\n")
+        
+        model.train()
     
     logger.info(f"SFT warm-up complete for {team_name}")
 
