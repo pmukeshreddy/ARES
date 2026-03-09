@@ -48,24 +48,29 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
     
     model.eval()
     
-    # 3. Generate Predictions with majority voting
-    # Training generates N=16 completions per prompt — evaluating with just 1
-    # misses the diversity. Generate N completions and take majority vote.
-    num_votes = 8  # Number of completions per prompt for majority voting
+    # 3. Generate Predictions with majority voting (BATCHED)
+    num_votes = 8
+    prompt_batch_size = 8  # Process 8 prompts at once, each with 8 votes
     results = []
     
+    # Pre-format all prompts
+    all_formatted = []
+    for item in dataset:
+        messages = [
+            {"role": "system", "content": "You are a helpful AI code reviewer."},
+            {"role": "user", "content": item["prompt"]}
+        ]
+        all_formatted.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
+    
     with torch.no_grad():
-        for i in tqdm(range(len(dataset)), desc=f"Evaluating {team_name}"):
-            item = dataset[i]
-            messages = [
-                {"role": "system", "content": "You are a helpful AI code reviewer."},
-                {"role": "user", "content": item["prompt"]}
-            ]
-            formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        for i in tqdm(range(0, len(dataset), prompt_batch_size), desc=f"Evaluating {team_name}"):
+            batch_items = dataset[i:i+prompt_batch_size]
+            batch_formatted = all_formatted[i:i+prompt_batch_size]
+            actual_bs = len(batch_items)
             
-            inputs = tokenizer([formatted], padding=True, truncation=True, max_length=1536, return_tensors="pt").to(model.device)
+            inputs = tokenizer(batch_formatted, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(model.device)
             
-            # Generate all N completions in ONE forward pass
+            # Generate: batch_size × num_votes completions in ONE call
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=512,
@@ -75,38 +80,42 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
                 num_return_sequences=num_votes,
                 pad_token_id=tokenizer.pad_token_id
             )
+            # outputs shape: (actual_bs * num_votes, seq_len)
+            # Order: [prompt0_vote0, prompt0_vote1, ..., prompt0_vote7, prompt1_vote0, ...]
             
-            # Parse all completions
-            votes_surface = 0
-            votes_filter = 0
-            all_completions = []
-            prompt_len = len(inputs.input_ids[0])
-            
-            for v in range(num_votes):
-                generated_ids = outputs[v][prompt_len:]
-                completion = tokenizer.decode(generated_ids, skip_special_tokens=True)
-                parsed = parse_completion(completion)
-                all_completions.append(completion)
+            for b_idx in range(actual_bs):
+                votes_surface = 0
+                votes_filter = 0
+                first_completion = None
+                prompt_len = inputs.attention_mask[b_idx].sum().item()
                 
-                if parsed["decision"] == "SURFACE":
-                    votes_surface += 1
-                elif parsed["decision"] == "FILTER":
-                    votes_filter += 1
-            
-            # Majority vote
-            prediction = 1 if votes_surface > votes_filter else 0
-            
-            results.append({
-                "team": team_name,
-                "prompt": item["prompt"],
-                "diff": item["diff"],
-                "comment": item["comment"],
-                "ground_truth_label": item["label"],
-                "predicted_label": prediction,
-                "predicted_score": None,
-                "raw_completion": all_completions[0],
-                "votes_surface": votes_surface,
-                "votes_filter": votes_filter
+                for v in range(num_votes):
+                    out_idx = b_idx * num_votes + v
+                    generated_ids = outputs[out_idx][prompt_len:]
+                    completion = tokenizer.decode(generated_ids, skip_special_tokens=True)
+                    parsed = parse_completion(completion)
+                    
+                    if first_completion is None:
+                        first_completion = completion
+                    if parsed["decision"] == "SURFACE":
+                        votes_surface += 1
+                    elif parsed["decision"] == "FILTER":
+                        votes_filter += 1
+                
+                prediction = 1 if votes_surface > votes_filter else 0
+                item = batch_items[b_idx]
+                
+                results.append({
+                    "team": team_name,
+                    "prompt": item["prompt"],
+                    "diff": item["diff"],
+                    "comment": item["comment"],
+                    "ground_truth_label": item["label"],
+                    "predicted_label": prediction,
+                    "predicted_score": None,
+                    "raw_completion": first_completion,
+                    "votes_surface": votes_surface,
+                    "votes_filter": votes_filter
                 })
                 
     # 4. Calculate Metrics
