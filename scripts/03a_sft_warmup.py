@@ -254,7 +254,7 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
         logger.warning(f"SFT Warmup: {missing_scores} out of {len(raw_dataset)} samples missing from precomputed scores. (Fallback to 0.5 applied)")
     
     # Generate content-specific reasoning using teacher model (rejection sampling)
-    # generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num_candidates=4)
+    generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num_candidates=4)
     teacher_count = sum(1 for d in dataset if "teacher_reasoning" in d)
     
     # DEBUG: Show training data composition
