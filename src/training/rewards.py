@@ -18,8 +18,8 @@ def parse_completion(completion: str) -> dict:
     if think_match:
         parsed["think"] = think_match.group(1).strip()
         
-    # Extract score
-    score_match = re.search(r'<score>(.*?)</score>', completion, re.DOTALL)
+    # Extract score (also match <scores> which the model sometimes generates)
+    score_match = re.search(r'<scores?>(.*?)</scores?>', completion, re.DOTALL)
     if score_match:
         try:
             val = float(score_match.group(1).strip())

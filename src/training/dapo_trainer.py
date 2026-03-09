@@ -316,11 +316,14 @@ class DAPOTrainer:
             
             # 1. Sync LoRA weights to SGLang every N steps (avoids deadlock + faster)
             if step % lora_sync_interval == 0 or current_lora_name is None:
-                sync_path = f"{lora_sync_dir}_step{step}"
-                os.makedirs(sync_path, exist_ok=True)
-                self.model.save_pretrained(sync_path)
                 new_lora_name = f"{team_name}_step{step}"
-                self.sglang.load_lora(new_lora_name, sync_path)
+                if new_lora_name == current_lora_name:
+                    pass  # Already loaded (e.g. from SFT baseline eval)
+                else:
+                    sync_path = f"{lora_sync_dir}_step{step}"
+                    os.makedirs(sync_path, exist_ok=True)
+                    self.model.save_pretrained(sync_path)
+                    self.sglang.load_lora(new_lora_name, sync_path)
                 current_lora_name = new_lora_name
                 
                 # Clean up old sync dirs to avoid filling /tmp
