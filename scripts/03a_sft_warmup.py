@@ -283,6 +283,9 @@ def main():
     )
     model = get_peft_model(base_model, lora_config)
     
+    # SFT warm-up for selected teams
+    from src.data.team_dataset import TEAM_PROFILES
+    
     # Parse --teams argument
     import argparse
     parser = argparse.ArgumentParser()
