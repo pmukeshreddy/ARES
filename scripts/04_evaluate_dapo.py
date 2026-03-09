@@ -267,9 +267,11 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
     false_positives = sum(1 for r in results if r["ground_truth_label"] == 0 and r["predicted_label"] == 1)
     false_negatives = sum(1 for r in results if r["ground_truth_label"] == 1 and r["predicted_label"] == 0)
     
-    precision = true_positives / max(1, (true_positives + false_positives))
+    # Address Rate = Comments devs acted on (True Positives) / Total comments posted (True Positives + False Positives)
+    # This is mathematically identical to Precision.
+    address_rate = true_positives / max(1, (true_positives + false_positives))
     recall = true_positives / max(1, (true_positives + false_negatives))
-    f1 = 2 * (precision * recall) / max(1e-6, (precision + recall))
+    f1 = 2 * (address_rate * recall) / max(1e-6, (address_rate + recall))
     surface_ratio = sum(1 for r in results if r["predicted_label"] == 1) / len(results)
     
     # Per-sample diagnostics
@@ -286,7 +288,7 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
     metrics = {
         "team": team_name,
         "accuracy": accuracy,
-        "precision": precision,
+        "address_rate": address_rate,
         "recall": recall,
         "f1": f1,
         "surface_ratio": surface_ratio,
@@ -361,10 +363,10 @@ def main():
         print("\n" + "=" * 60)
         checkpoint_label = "SFT" if args.sft else "DAPO"
         print(f"EVALUATION SUMMARY ({checkpoint_label}, SGLang, {args.num_votes}-vote)")
-        print("=" * 60)
+        print("=" * 70)
         for m in all_metrics:
-            print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | P: {m['precision']:.2f} | R: {m['recall']:.2f} | F1: {m['f1']:.2f} | Surface%: {m['surface_ratio']:.2f}")
-        print("=" * 60)
+            print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f} | R: {m['recall']:.2f} | F1: {m['f1']:.2f} | Surface%: {m['surface_ratio']:.2f}")
+        print("=" * 70)
     
     finally:
         logger.info("Shutting down SGLang server...")
