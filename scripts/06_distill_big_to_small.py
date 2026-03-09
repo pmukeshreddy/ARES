@@ -27,8 +27,8 @@ import yaml
 import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTTrainer, SFTConfig
 import requests
 
 # Add project root to path
@@ -206,7 +206,7 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
     raw_dataset = Dataset.from_list(synthetic_data)
     train_dataset = raw_dataset.map(lambda x: format_prompt(x, tokenizer), remove_columns=raw_dataset.column_names)
     
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=output_dir,
         num_train_epochs=2,
         per_device_train_batch_size=8,
@@ -215,16 +215,16 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         logging_steps=10,
         warmup_ratio=0.05,
         bf16=True,
-        save_strategy="no"
+        save_strategy="no",
+        dataset_text_field="text",
+        max_seq_length=2048,
+        packing=False
     )
     
     trainer = SFTTrainer(
         model=student_model,
         args=training_args,
-        train_dataset=train_dataset,
-        dataset_text_field="text",
-        max_seq_length=2048,
-        packing=False
+        train_dataset=train_dataset
     )
     
     logger.info("Initiating Neurological Knowledge Transfer (SFT)...")
