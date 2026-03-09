@@ -63,24 +63,27 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
             ]
             formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             
-            # Generate N completions for this prompt
             inputs = tokenizer([formatted], padding=True, truncation=True, max_length=1536, return_tensors="pt").to(model.device)
             
+            # Generate all N completions in ONE forward pass
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=512,
+                temperature=1.0,
+                top_p=0.95,
+                do_sample=True,
+                num_return_sequences=num_votes,
+                pad_token_id=tokenizer.pad_token_id
+            )
+            
+            # Parse all completions
             votes_surface = 0
             votes_filter = 0
             all_completions = []
+            prompt_len = len(inputs.input_ids[0])
             
             for v in range(num_votes):
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    temperature=1.0,
-                    top_p=0.95,
-                    do_sample=True,
-                    pad_token_id=tokenizer.pad_token_id
-                )
-                
-                generated_ids = outputs[0][len(inputs.input_ids[0]):]
+                generated_ids = outputs[v][prompt_len:]
                 completion = tokenizer.decode(generated_ids, skip_special_tokens=True)
                 parsed = parse_completion(completion)
                 all_completions.append(completion)
@@ -92,7 +95,6 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
             
             # Majority vote
             prediction = 1 if votes_surface > votes_filter else 0
-            best_completion = all_completions[0]
             
             results.append({
                 "team": team_name,
@@ -102,7 +104,7 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
                 "ground_truth_label": item["label"],
                 "predicted_label": prediction,
                 "predicted_score": None,
-                "raw_completion": best_completion,
+                "raw_completion": all_completions[0],
                 "votes_surface": votes_surface,
                 "votes_filter": votes_filter
                 })
