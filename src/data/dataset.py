@@ -56,8 +56,13 @@ class RewardModelDataset(Dataset):
                         continue
         
         n_pos = sum(1 for s in self.samples if s["label"] == 1)
+        n_neg = len(self.samples) - n_pos
+        pos_pct = (n_pos / len(self.samples)) * 100 if len(self.samples) > 0 else 0
+        neg_pct = (n_neg / len(self.samples)) * 100 if len(self.samples) > 0 else 0
+        
         logger.info(f"Loaded {len(self.samples)} samples "
-                    f"(pos={n_pos}, neg={len(self.samples)-n_pos})")
+                    f"(Surface [pos, 1]: {n_pos} ({pos_pct:.1f}%), "
+                    f"Filter [neg, 0]: {n_neg} ({neg_pct:.1f}%))")
     
     def __len__(self) -> int:
         return len(self.samples)
