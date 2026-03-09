@@ -74,7 +74,7 @@ def create_sft_example(item: dict, tokenizer) -> str:
     return prompt_text, ideal_completion
 
 
-def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 5, lr: float = 5e-6):
+def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 5, lr: float = 2e-6):
     """Runs SFT warm-up for a single team using a subset of the unlabeled data."""
     logger.info(f"\n{'='*50}\nSFT Warm-Up for team: {team_name}\n{'='*50}")
     
@@ -136,6 +136,8 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
     
     for epoch in range(num_epochs):
         total_loss = 0.0
+        valid_steps = 0
+        nan_steps = 0
         random_order = list(range(len(dataset)))
         import random
         random.shuffle(random_order)
@@ -152,6 +154,11 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
             prompt_inputs = tokenizer(prompt_text, truncation=True, max_length=1536, return_tensors="pt")
             prompt_len = prompt_inputs.input_ids.shape[1]
             
+            # Skip if prompt consumes all tokens (empty completion → NaN loss)
+            if prompt_len >= inputs.input_ids.shape[1]:
+                nan_steps += 1
+                continue
+            
             # Standard causal LM loss (predict next token)
             labels = inputs.input_ids.clone()
             
@@ -161,14 +168,23 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
             outputs = model(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask, labels=labels)
             loss = outputs.loss
             
+            # Skip NaN losses (numerical instability)
+            if torch.isnan(loss) or torch.isinf(loss):
+                nan_steps += 1
+                optimizer.zero_grad()
+                continue
+            
             loss.backward()
+            # Gradient clipping to prevent explosion
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             optimizer.zero_grad()
             
             total_loss += loss.item()
+            valid_steps += 1
         
-        avg_loss = total_loss / len(dataset)
-        logger.info(f"SFT Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
+        avg_loss = total_loss / max(1, valid_steps)
+        logger.info(f"SFT Epoch {epoch+1} | Avg Loss: {avg_loss:.4f} | Valid: {valid_steps} | Skipped (NaN/empty): {nan_steps}")
         
         # ── Per-Epoch Eval ──────────────────────────────────
         model.eval()
