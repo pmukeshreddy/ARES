@@ -148,7 +148,7 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
             gen_ids = model.generate(
                 batch_inputs.input_ids.repeat_interleave(num_candidates, dim=0),
                 attention_mask=batch_inputs.attention_mask.repeat_interleave(num_candidates, dim=0),
-                max_new_tokens=512,
+                max_new_tokens=256,
                 do_sample=True,
                 temperature=0.8,
                 top_p=0.95,
@@ -354,7 +354,7 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
             gen_ids = model.generate(
                 batch_inputs.input_ids,
                 attention_mask=batch_inputs.attention_mask,
-                max_new_tokens=512,
+                max_new_tokens=256,
                 do_sample=True,
                 temperature=1.0,
                 top_p=0.95,
