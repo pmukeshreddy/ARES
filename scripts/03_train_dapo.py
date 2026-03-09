@@ -50,8 +50,8 @@ def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subpro
         "--max-loras-per-batch", "2",
         "--lora-target-modules"
     ] + lora_targets + [
-        # Limit memory to 50% so PyTorch has space for training
-        "--mem-fraction-static", "0.5",
+        # Limit memory to 40% so PyTorch has space for training (Required for 14B on 80GB VRAM)
+        "--mem-fraction-static", "0.4",
         # For H100
         "--dtype", "bfloat16"
     ]
