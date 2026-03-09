@@ -75,91 +75,97 @@ def create_sft_example(item: dict, tokenizer) -> str:
     return prompt_text, ideal_completion
 
 
-def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=4):
+def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=4, batch_size=8):
     """Use the base model as a teacher to generate content-specific reasoning for each sample.
     
-    For each sample, generates num_candidates completions and keeps the one that:
-    1. Has the correct decision (matches ground truth label)
-    2. Has the best format score
-    
-    This is rejection sampling — DeepSeek R1 style distillation.
+    Batched rejection sampling — generates num_candidates completions per sample,
+    keeps the one with correct decision + best content overlap.
     """
     import re
-    logger.info(f"Generating teacher reasoning for {len(dataset)} samples (rejection sampling, {num_candidates} candidates each)...")
+    logger.info(f"Generating teacher reasoning for {len(dataset)} samples (batched, {num_candidates} candidates each)...")
     
     model.eval()
     success_count = 0
     
+    common_words = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+                   "have", "has", "had", "do", "does", "did", "will", "would", "could",
+                   "should", "may", "might", "can", "this", "that", "these", "those",
+                   "it", "its", "in", "on", "at", "to", "for", "of", "with", "by",
+                   "from", "not", "and", "or", "but", "if", "then", "else", "than"}
+    
+    tokenizer.padding_side = "left"
+    
     with torch.no_grad():
-        for i, item in enumerate(tqdm(dataset, desc="Teacher reasoning")):
-            prompt = item["prompt"]
-            label = item["label"]
-            expected_decision = "SURFACE" if label == 1 else "FILTER"
+        for batch_start in tqdm(range(0, len(dataset), batch_size), desc="Teacher reasoning"):
+            batch_items = dataset[batch_start:batch_start + batch_size]
             
-            messages = [
-                {"role": "system", "content": "You are a helpful AI code reviewer."},
-                {"role": "user", "content": prompt}
-            ]
-            prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            inputs = tokenizer(prompt_text, truncation=True, max_length=1536, return_tensors="pt").to(device)
+            # Prepare prompts for batch
+            prompt_texts = []
+            for item in batch_items:
+                messages = [
+                    {"role": "system", "content": "You are a helpful AI code reviewer."},
+                    {"role": "user", "content": item["prompt"]}
+                ]
+                prompt_texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
-            best_reasoning = None
-            best_score = -1
+            # Tokenize batch
+            batch_inputs = tokenizer(prompt_texts, truncation=True, max_length=1536,
+                                    padding=True, return_tensors="pt").to(device)
+            prompt_len = batch_inputs.input_ids.shape[1]
             
-            for _ in range(num_candidates):
-                gen_ids = model.generate(
-                    inputs.input_ids,
-                    attention_mask=inputs.attention_mask,
-                    max_new_tokens=256,
-                    do_sample=True,
-                    temperature=0.8,
-                    top_p=0.95,
-                    pad_token_id=tokenizer.eos_token_id
-                )
-                gen_text = tokenizer.decode(gen_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-                
-                # Check if decision matches ground truth
-                dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL)
-                if not dec_match:
-                    continue
-                pred_decision = dec_match.group(1).strip().upper()
-                if pred_decision != expected_decision:
-                    continue
-                
-                # Extract reasoning
-                think_match = re.search(r'<think>(.*?)</think>', gen_text, re.DOTALL)
-                if not think_match:
-                    continue
-                reasoning = think_match.group(1).strip()
-                
-                # Score: prefer longer, more specific reasoning (not generic templates)
-                # Bonus for mentioning specific content from diff/comment
-                content_bonus = 0
-                diff_words = set(item.get("diff", "")[:200].lower().split())
-                comment_words = set(item.get("comment", "")[:200].lower().split())
-                reasoning_words = set(reasoning.lower().split())
-                # Check for content-specific overlap (beyond common words)
-                common_words = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-                              "have", "has", "had", "do", "does", "did", "will", "would", "could",
-                              "should", "may", "might", "can", "this", "that", "these", "those",
-                              "it", "its", "in", "on", "at", "to", "for", "of", "with", "by",
-                              "from", "not", "and", "or", "but", "if", "then", "else", "than"}
-                specific_diff = diff_words - common_words
-                specific_comment = comment_words - common_words
-                overlap = len(reasoning_words & (specific_diff | specific_comment))
-                content_bonus = min(overlap / 5.0, 1.0)  # Cap at 1.0
-                
-                quality = len(reasoning) / 200.0 + content_bonus  # Length + content specificity
-                
-                if quality > best_score:
-                    best_score = quality
-                    best_reasoning = reasoning
+            # Generate num_candidates per sample in one call
+            gen_ids = model.generate(
+                batch_inputs.input_ids.repeat_interleave(num_candidates, dim=0),
+                attention_mask=batch_inputs.attention_mask.repeat_interleave(num_candidates, dim=0),
+                max_new_tokens=256,
+                do_sample=True,
+                temperature=0.8,
+                top_p=0.95,
+                pad_token_id=tokenizer.eos_token_id
+            )
             
-            if best_reasoning:
-                item["teacher_reasoning"] = best_reasoning
-                success_count += 1
-        
-    logger.info(f"Teacher reasoning generated: {success_count}/{len(dataset)} samples got content-specific reasoning ({100*success_count/len(dataset):.0f}%)")
+            # Parse results — gen_ids has (batch_size * num_candidates) rows
+            for idx, item in enumerate(batch_items):
+                expected_decision = "SURFACE" if item["label"] == 1 else "FILTER"
+                best_reasoning = None
+                best_quality = -1
+                
+                diff_words = set(item.get("diff", "")[:200].lower().split()) - common_words
+                comment_words = set(item.get("comment", "")[:200].lower().split()) - common_words
+                specific_words = diff_words | comment_words
+                
+                for c in range(num_candidates):
+                    row = idx * num_candidates + c
+                    gen_text = tokenizer.decode(gen_ids[row][prompt_len:], skip_special_tokens=True)
+                    
+                    # Check decision matches
+                    dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL)
+                    if not dec_match:
+                        continue
+                    if dec_match.group(1).strip().upper() != expected_decision:
+                        continue
+                    
+                    # Extract reasoning
+                    think_match = re.search(r'<think>(.*?)</think>', gen_text, re.DOTALL)
+                    if not think_match:
+                        continue
+                    reasoning = think_match.group(1).strip()
+                    
+                    # Quality: length + content overlap
+                    reasoning_words = set(reasoning.lower().split())
+                    overlap = len(reasoning_words & specific_words)
+                    quality = len(reasoning) / 200.0 + min(overlap / 5.0, 1.0)
+                    
+                    if quality > best_quality:
+                        best_quality = quality
+                        best_reasoning = reasoning
+                
+                if best_reasoning:
+                    item["teacher_reasoning"] = best_reasoning
+                    success_count += 1
+    
+    tokenizer.padding_side = "right"
+    logger.info(f"Teacher reasoning: {success_count}/{len(dataset)} content-specific ({100*success_count/len(dataset):.0f}%)")
     model.train()
 
 
