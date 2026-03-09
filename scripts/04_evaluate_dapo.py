@@ -222,33 +222,20 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
         )
         
         for b_idx, item in enumerate(batch):
-            votes_surface = 0
-            votes_filter = 0
-            first_completion = None
-            
             for comp in completions_grouped[b_idx]:
                 parsed = parse_completion(comp)
-                if first_completion is None:
-                    first_completion = comp
-                if parsed["decision"] == "SURFACE":
-                    votes_surface += 1
-                elif parsed["decision"] == "FILTER":
-                    votes_filter += 1
-            
-            prediction = 1 if votes_surface > votes_filter else 0
-            
-            results.append({
-                "team": team_name,
-                "ground_truth_label": item["label"],
-                "predicted_label": prediction,
-                "raw_completion": first_completion or "",
-                "votes_surface": votes_surface,
-                "votes_filter": votes_filter
-            })
+                pred = 1 if parsed["decision"] == "SURFACE" else 0
+                
+                results.append({
+                    "team": team_name,
+                    "ground_truth_label": item["label"],
+                    "predicted_label": pred,
+                    "raw_completion": comp,
+                })
     
     # Individual completion stats (matches training S:F reporting)
-    total_surface_votes = sum(r["votes_surface"] for r in results)
-    total_filter_votes = sum(r["votes_filter"] for r in results)
+    total_surface_votes = sum(1 for r in results if r["predicted_label"] == 1)
+    total_filter_votes = sum(1 for r in results if r["predicted_label"] == 0)
     total_votes = total_surface_votes + total_filter_votes
     completion_surface_pct = total_surface_votes / max(1, total_votes) * 100
     print(f"\n  Individual completion stats: {total_surface_votes}S/{total_filter_votes}F ({completion_surface_pct:.0f}% SURFACE across all {total_votes} completions)")
@@ -272,22 +259,21 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
     # Total comments Greptile posted = true_positives + false_positives (Predictions=1)
     address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
     
-    # Per-sample diagnostics
-    print(f"\n  Per-sample results ({team_name}, {num_votes}-vote majority):")
+    # Per-sample diagnostics (showing individual completions now)
+    print(f"\n  Per-completion results ({team_name}, {num_votes} completions per prompt):")
     for r in results[:20]:
         gt = "SURFACE" if r["ground_truth_label"] == 1 else "FILTER"
         pred = "SURFACE" if r["predicted_label"] == 1 else "FILTER"
         match = "✓" if gt == pred else "✗"
-        vs = r["votes_surface"]
-        vf = r["votes_filter"]
         snippet = r["raw_completion"][:100].replace('\n', ' ')
-        print(f"    [{match}] GT={gt:7s} Pred={pred:7s} ({vs}S/{vf}F) | {snippet}...")
+        print(f"    [{match}] GT={gt:7s} Pred={pred:7s} | {snippet}...")
     
     metrics = {
         "team": team_name,
         "accuracy": accuracy,
         "address_rate": address_rate,
-        "total_samples": len(results)
+        "total_samples": len(dataset),
+        "total_completions": len(results)
     }
     
     return metrics, results
