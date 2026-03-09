@@ -363,10 +363,11 @@ class DAPOTrainer:
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
-                    """Normalize each row (group) independently: (x - mean) / (std + eps)"""
+                    """Dr.GRPO: subtract mean only, no std division.
+                    Dividing by std over-weights groups where the model is already
+                    confident (low variance), reinforcing the existing bias."""
                     m = t.mean(dim=1, keepdim=True)
-                    s = t.std(dim=1, keepdim=True)
-                    return (t - m) / (s + 1e-8)
+                    return t - m
                 
                 adv_r1 = normalize_within_group(r1_tensor) * w_r1
                 adv_r2 = normalize_within_group(r2_tensor) * w_r2
