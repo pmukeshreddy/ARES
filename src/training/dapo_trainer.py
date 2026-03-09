@@ -251,7 +251,7 @@ class DAPOTrainer:
         lora_sync_dir = f"/tmp/lora_dapo_{team_name}"
         os.makedirs(lora_sync_dir, exist_ok=True)
         current_lora_name = None  # Track active LoRA name for SGLang
-        lora_sync_interval = self.config.get("lora_sync_interval", 5)
+        lora_sync_interval = self.config.get("lora_sync_interval", 2)
         
         global_step = 0
         total_steps = max_steps
