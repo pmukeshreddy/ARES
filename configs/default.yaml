@@ -116,5 +116,5 @@ dapo:
   r5_weight: 0.20      # Overlong penalty
   
   # R2 configuration
-  r2_false_positive_penalty: -1.5
-  r2_false_negative_penalty: -0.7
+  r2_false_positive_penalty: -1.0
+  r2_false_negative_penalty: -1.0
