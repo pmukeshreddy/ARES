@@ -28,7 +28,7 @@ import torch
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer
 import requests
 
 # Add project root to path
