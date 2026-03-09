@@ -75,7 +75,7 @@ def create_sft_example(item: dict, tokenizer) -> str:
     return prompt_text, ideal_completion
 
 
-def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=4, batch_size=8):
+def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=8, batch_size=16):
     """Use the base model as a teacher to generate content-specific reasoning for each sample.
     
     Batched rejection sampling — generates num_candidates completions per sample,
