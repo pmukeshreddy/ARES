@@ -368,6 +368,7 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
             n_filter_pred = 0
             n_invalid = 0
             example_outputs = []
+            invalid_outputs = []
             
             for i in range(len(eval_subset)):
                 prompt_len = batch_inputs.input_ids.shape[1]
@@ -383,9 +384,11 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
                     n_filter_pred += 1
                 else:
                     n_invalid += 1
+                    if len(invalid_outputs) < 3:
+                        invalid_outputs.append((gt, gen_text))
                 if pred == gt:
                     correct += 1
-                if len(example_outputs) < 3:
+                if len(example_outputs) < 3 and pred is not None:
                     example_outputs.append((gt, pred, gen_text[:250]))
         
         total_eval = len(eval_subset)
@@ -397,6 +400,12 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
         for gt, pred, text in example_outputs:
             match = "✓" if pred == gt else "✗"
             print(f"  [{match}] GT={gt:7s} Pred={pred or 'NONE':7s} | {text}")
+        
+        if invalid_outputs:
+            print(f"\n  [DEBUG] Sample INVALID formations:")
+            for gt, text in invalid_outputs:
+                print(f"    GT={gt:7s} | RAW OUTPUT: \n{text}\n    {'-'*20}")
+                
         print(f"{'='*60}\n")
         
         model.train()
