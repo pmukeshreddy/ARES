@@ -79,8 +79,7 @@ def start_sglang_server(model_name: str, dapo_config: dict):
         "--max-lora-rank", lora_rank,
         "--max-loras-per-batch", "2",
         "--lora-target-modules"
-    ] + lora_targets + [
-        "--mem-fraction-static", "0.7",
+        "--mem-fraction-static", "0.4",
         "--dtype", "bfloat16"
     ]
     
@@ -145,7 +144,7 @@ def generate_completions(prompts: list, lora_name: str, tokenizer, n: int = 8, m
         }
         
         try:
-            resp = requests.post(url, json=payload, timeout=60)
+            resp = requests.post(url, json=payload, timeout=300)
             resp_json = resp.json()
             
             if isinstance(resp_json, list):
