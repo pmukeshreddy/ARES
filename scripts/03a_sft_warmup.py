@@ -31,36 +31,37 @@ logger = logging.getLogger(__name__)
 
 
 def create_sft_example(item: dict, tokenizer) -> str:
-    """Creates a supervised training example with the ideal completion format."""
+    """Creates a supervised training example. Uses pre-generated reasoning if available,
+    otherwise falls back to content-referencing templates."""
     prompt = item["prompt"]
     label = item["label"]
-    diff = item.get("diff", "")[:200]
-    comment = item.get("comment", "")[:200]
-    # Create a well-formed ideal completion
     decision = "SURFACE" if label == 1 else "FILTER"
     score = item.get("score", 0.5)
     
-    # Create a grounded reasoning trace that argues both sides (matches new prompt instruction)
-    if label == 1:
-        reasoning = (
-            f"Let me consider both sides. "
-            f"Reasons this might NOT be relevant: the comment could be seen as a minor suggestion "
-            f"rather than a critical issue. "
-            f"However, reasons this IS relevant: looking at the code changes and the comment's content, "
-            f"this touches on a concern that aligns with what the team cares about — it could affect "
-            f"correctness, reliability, or the team's stated priorities. "
-            f"On balance, this comment provides value the team should see."
-        )
+    # Use teacher-generated reasoning if available (set by generate_teacher_reasoning)
+    if "teacher_reasoning" in item:
+        reasoning = item["teacher_reasoning"]
     else:
-        reasoning = (
-            f"Let me consider both sides. "
-            f"Reasons this might be relevant: the comment does point out something in the code "
-            f"that could be improved. "
-            f"However, reasons this is NOT relevant: the specific concern raised doesn't align "
-            f"with what this team prioritizes — it falls outside their stated focus areas. "
-            f"The team would likely consider this noise rather than actionable feedback. "
-            f"On balance, filtering this comment would reduce noise for the team."
-        )
+        # Fallback: content-referencing templates (reference actual diff/comment)
+        diff_snippet = item.get("diff", "")[:100].replace("\n", " ").strip()
+        comment_snippet = item.get("comment", "")[:100].replace("\n", " ").strip()
+        
+        if label == 1:
+            reasoning = (
+                f"Let me consider both sides. "
+                f"The comment says: \"{comment_snippet}\" — at first glance this might seem minor. "
+                f"However, looking at the diff ({diff_snippet}...), this touches on a concern "
+                f"that aligns with the team's priorities around correctness and reliability. "
+                f"On balance, this comment provides value the team should see."
+            )
+        else:
+            reasoning = (
+                f"Let me consider both sides. "
+                f"The comment says: \"{comment_snippet}\" — this does raise a point about the code. "
+                f"However, looking at the diff ({diff_snippet}...), the concern raised is more of a "
+                f"stylistic or minor suggestion that falls outside the team's stated focus areas. "
+                f"On balance, filtering this would reduce noise for the team."
+            )
     
     ideal_completion = f"<think>\n{reasoning}\n</think>\n<score>{score:.4f}</score>\n<decision>{decision}</decision>"
     
@@ -72,6 +73,94 @@ def create_sft_example(item: dict, tokenizer) -> str:
     prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     
     return prompt_text, ideal_completion
+
+
+def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=4):
+    """Use the base model as a teacher to generate content-specific reasoning for each sample.
+    
+    For each sample, generates num_candidates completions and keeps the one that:
+    1. Has the correct decision (matches ground truth label)
+    2. Has the best format score
+    
+    This is rejection sampling — DeepSeek R1 style distillation.
+    """
+    import re
+    logger.info(f"Generating teacher reasoning for {len(dataset)} samples (rejection sampling, {num_candidates} candidates each)...")
+    
+    model.eval()
+    success_count = 0
+    
+    with torch.no_grad():
+        for i, item in enumerate(tqdm(dataset, desc="Teacher reasoning")):
+            prompt = item["prompt"]
+            label = item["label"]
+            expected_decision = "SURFACE" if label == 1 else "FILTER"
+            
+            messages = [
+                {"role": "system", "content": "You are a helpful AI code reviewer."},
+                {"role": "user", "content": prompt}
+            ]
+            prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            inputs = tokenizer(prompt_text, truncation=True, max_length=1536, return_tensors="pt").to(device)
+            
+            best_reasoning = None
+            best_score = -1
+            
+            for _ in range(num_candidates):
+                gen_ids = model.generate(
+                    inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    max_new_tokens=256,
+                    do_sample=True,
+                    temperature=0.8,
+                    top_p=0.95,
+                    pad_token_id=tokenizer.eos_token_id
+                )
+                gen_text = tokenizer.decode(gen_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+                
+                # Check if decision matches ground truth
+                dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL)
+                if not dec_match:
+                    continue
+                pred_decision = dec_match.group(1).strip().upper()
+                if pred_decision != expected_decision:
+                    continue
+                
+                # Extract reasoning
+                think_match = re.search(r'<think>(.*?)</think>', gen_text, re.DOTALL)
+                if not think_match:
+                    continue
+                reasoning = think_match.group(1).strip()
+                
+                # Score: prefer longer, more specific reasoning (not generic templates)
+                # Bonus for mentioning specific content from diff/comment
+                content_bonus = 0
+                diff_words = set(item.get("diff", "")[:200].lower().split())
+                comment_words = set(item.get("comment", "")[:200].lower().split())
+                reasoning_words = set(reasoning.lower().split())
+                # Check for content-specific overlap (beyond common words)
+                common_words = {"the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+                              "have", "has", "had", "do", "does", "did", "will", "would", "could",
+                              "should", "may", "might", "can", "this", "that", "these", "those",
+                              "it", "its", "in", "on", "at", "to", "for", "of", "with", "by",
+                              "from", "not", "and", "or", "but", "if", "then", "else", "than"}
+                specific_diff = diff_words - common_words
+                specific_comment = comment_words - common_words
+                overlap = len(reasoning_words & (specific_diff | specific_comment))
+                content_bonus = min(overlap / 5.0, 1.0)  # Cap at 1.0
+                
+                quality = len(reasoning) / 200.0 + content_bonus  # Length + content specificity
+                
+                if quality > best_score:
+                    best_score = quality
+                    best_reasoning = reasoning
+            
+            if best_reasoning:
+                item["teacher_reasoning"] = best_reasoning
+                success_count += 1
+        
+    logger.info(f"Teacher reasoning generated: {success_count}/{len(dataset)} samples got content-specific reasoning ({100*success_count/len(dataset):.0f}%)")
+    model.train()
 
 
 def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 5, lr: float = 2e-6):
@@ -112,6 +201,10 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
     if missing_scores > 0:
         logger.warning(f"SFT Warmup: {missing_scores} out of {len(raw_dataset)} samples missing from precomputed scores. (Fallback to 0.5 applied)")
     
+    # Generate content-specific reasoning using teacher model (rejection sampling)
+    generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=4)
+    teacher_count = sum(1 for d in dataset if "teacher_reasoning" in d)
+    
     # DEBUG: Show training data composition
     n_surface_train = sum(1 for d in dataset if d["label"] == 1)
     n_filter_train = sum(1 for d in dataset if d["label"] == 0)
@@ -119,11 +212,12 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
     print(f"SFT TRAINING DATA for {team_name}:")
     print(f"  {len(dataset)} samples: {n_surface_train} SURFACE ({100*n_surface_train/len(dataset):.0f}%) / {n_filter_train} FILTER ({100*n_filter_train/len(dataset):.0f}%)")
     print(f"  Threshold: {threshold}")
+    print(f"  Teacher reasoning: {teacher_count}/{len(dataset)} content-specific ({100*teacher_count/len(dataset):.0f}%)")
     # Show a sample of what the ideal completions look like
     for i, item in enumerate(dataset[:2]):
         _, comp = create_sft_example(item, tokenizer)
         label = "SURFACE" if item["label"] == 1 else "FILTER"
-        print(f"  Example [{label}]: {comp[:200]}...")
+        print(f"  Example [{label}]: {comp[:300]}...")
     print(f"{'='*60}\n")
         
     logger.info(f"Using {len(dataset)} samples for SFT warm-up")
