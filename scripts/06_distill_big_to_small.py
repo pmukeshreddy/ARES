@@ -212,7 +212,7 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         gradient_accumulation_steps=2,
         learning_rate=5.0e-5,
         logging_steps=10,
-        warmup_ratio=0.05,
+        warmup_steps=10,
         bf16=True,
         save_strategy="no"
     )
@@ -221,7 +221,7 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         model=student_model,
         args=training_args,
         train_dataset=train_dataset,
-        dataset_text_field="text",
+        dataset_kwargs={"dataset_text_field": "text"},
         max_seq_length=2048,
         packing=False
     )
