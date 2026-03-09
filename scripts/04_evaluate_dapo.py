@@ -71,8 +71,8 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=512,
-                temperature=0.6,  # Moderate temp — not greedy but not random
-                top_p=0.9,
+                temperature=1.0,   # Match training temperature
+                top_p=0.95,
                 do_sample=True,
                 pad_token_id=tokenizer.pad_token_id
             )
@@ -114,6 +114,15 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
     
     surface_ratio = sum(1 for r in results if r["predicted_label"] == 1) / len(results)
     
+    # Per-sample diagnostics
+    print(f"\n  Per-sample results ({team_name}):")
+    for i, r in enumerate(results[:20]):
+        gt = "SURFACE" if r["ground_truth_label"] == 1 else "FILTER"
+        pred = "SURFACE" if r["predicted_label"] == 1 else "FILTER"
+        match = "✓" if gt == pred else "✗"
+        snippet = r["raw_completion"][:120].replace('\n', ' ')
+        print(f"    [{match}] GT={gt:7s} Pred={pred:7s} | {snippet}...")
+    
     metrics = {
         "team": team_name,
         "accuracy": accuracy,
@@ -137,6 +146,7 @@ def main():
     parser.add_argument("--checkpoint-type", choices=["dapo", "kd"], default="dapo",
                         help="Which checkpoint to evaluate: 'dapo' (per-team LoRA) or 'kd' (unified distilled LoRA)")
     parser.add_argument("--max-samples", type=int, default=50, help="Max test samples per team")
+    parser.add_argument("--sft", action="store_true", help="Evaluate SFT checkpoint instead of DAPO")
     args = parser.parse_args()
     
     with open(args.config, "r") as f:
@@ -191,17 +201,22 @@ def main():
         test_file = str(team_dir / "test.jsonl")
         
         if args.checkpoint_type == "dapo":
-            lora_path = str(Path("checkpoints/dapo") / f"dapo_lora_{team_name}")
+            if args.sft:
+                lora_path = str(Path("checkpoints/sft_warmup") / f"sft_warmup_{team_name}")
+                label = "SFT"
+            else:
+                lora_path = str(Path("checkpoints/dapo") / f"dapo_lora_{team_name}")
+                label = "DAPO"
             
             if os.path.exists(lora_path):
-                logger.info(f"Loading LoRA weights from {lora_path} for {team_name}...")
+                logger.info(f"Loading {label} LoRA weights from {lora_path} for {team_name}...")
                 if model is None:
                     model = PeftModel.from_pretrained(base_model, lora_path, adapter_name=team_name)
                 else:
                     model.load_adapter(lora_path, adapter_name=team_name)
                 model.set_adapter(team_name)
             else:
-                logger.warning(f"LoRA weights not found at {lora_path}. Using base model.")
+                logger.warning(f"{label} weights not found at {lora_path}. Using base model.")
                 model = base_model
         
         # For KD, model is already loaded — same LoRA for all teams
