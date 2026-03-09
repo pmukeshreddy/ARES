@@ -401,9 +401,26 @@ class DAPOTrainer:
                 # Count decisions across ALL completions
                 from src.training.rewards import parse_completion
                 all_decisions = [parse_completion(c)["decision"] for c in flat_completions]
-                n_surface_gen = sum(1 for d in all_decisions if d == "SURFACE")
-                n_filter_gen = sum(1 for d in all_decisions if d == "FILTER")
-                n_invalid_gen = sum(1 for d in all_decisions if d not in ("SURFACE", "FILTER"))
+                
+                # Calculate metrics for Address Rate
+                n_surface_pred = 0
+                n_filter_pred = 0
+                n_invalid_gen = 0
+                true_positives = 0
+                false_positives = 0
+                
+                for pred, gt in zip(all_decisions, flat_labels):
+                    if pred == "SURFACE":
+                        n_surface_pred += 1
+                        if gt == 1:
+                            true_positives += 1
+                        else:
+                            false_positives += 1
+                    elif pred == "FILTER":
+                        n_filter_pred += 1
+                    else:
+                        n_invalid_gen += 1
+                
                 total_gen = len(all_decisions)
                 
                 # 3. Compute Rewards
@@ -466,11 +483,13 @@ class DAPOTrainer:
             flat_completions = accumulated_completions
             flat_advantages = torch.tensor(accumulated_advantages, dtype=torch.float32, device=self.device)
             
-            # Compute S:F ratio for this step
-            sf_ratio = n_surface_gen / max(1, n_filter_gen)
-            sf_pct = 100 * n_surface_gen / max(1, total_gen)
-            ff_pct = 100 * n_filter_gen / max(1, total_gen)
+            # Compute S:F ratio & Address Rate for this step
+            sf_ratio = n_surface_pred / max(1, n_filter_pred)
+            sf_pct = 100 * n_surface_pred / max(1, total_gen)
+            ff_pct = 100 * n_filter_pred / max(1, total_gen)
             inv_pct = 100 * n_invalid_gen / max(1, total_gen)
+            
+            address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
             
             flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
             
@@ -570,6 +589,7 @@ class DAPOTrainer:
                     f"Step {global_step}/{total_steps} | "
                     f"Loss: {loss_total.item():.4f} | "
                     f"S:F={sf_ratio:.2f} ({sf_pct:.0f}%S/{ff_pct:.0f}%F/{inv_pct:.0f}%inv) | "
+                    f"AddrRate: {address_rate:.0f}% | "
                     f"R2(Match): {logs['r2']:.2f} | "
                     f"Total R: {logs['total_reward']:.2f} | Format: {logs['valid_format_ratio']*100:.0f}%"
                 )
