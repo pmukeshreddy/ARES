@@ -96,7 +96,7 @@ dapo:
   # Training
   batch_size: 4
   learning_rate: 2.0e-6
-  max_steps: 50
+  max_steps: 15
   
   # GRPO
   group_size: 8
@@ -109,11 +109,11 @@ dapo:
   max_new_tokens: 512
   
   # Reward Weights
-  r1_weight: 0.20      # Reasoning quality
-  r2_weight: 0.35      # Outcome match (team labels)
-  r3_weight: 0.15      # RM Agreement (Phase 1 F1=0.99 knowledge transfer)
+  r1_weight: 0.15      # Reasoning quality
+  r2_weight: 0.50      # Outcome match (team labels) — dominant signal
+  r3_weight: 0.05      # RM Agreement (noisy, downweighted)
   r4_weight: 0.15      # Format compliance
-  r5_weight: 0.20      # Overlong penalty
+  r5_weight: 0.15      # Overlong penalty
   
   # R2 configuration
   r2_false_positive_penalty: -1.0
