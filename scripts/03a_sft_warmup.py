@@ -140,7 +140,7 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
                 prompt_texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
             # Tokenize batch
-            batch_inputs = tokenizer(prompt_texts, truncation=True, max_length=1536,
+            batch_inputs = tokenizer(prompt_texts, truncation=True, max_length=2048,
                                     padding=True, return_tensors="pt").to(device)
             prompt_len = batch_inputs.input_ids.shape[1]
             
@@ -294,10 +294,10 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
             full_text = prompt_text + completion_text
             
             # Tokenize full combined text
-            inputs = tokenizer(full_text, truncation=True, max_length=1536, return_tensors="pt").to(device)
+            inputs = tokenizer(full_text, truncation=True, max_length=2048, return_tensors="pt").to(device)
             
             # Tokenize just the prompt to find where to mask
-            prompt_inputs = tokenizer(prompt_text, truncation=True, max_length=1536, return_tensors="pt")
+            prompt_inputs = tokenizer(prompt_text, truncation=True, max_length=2048, return_tensors="pt")
             prompt_len = prompt_inputs.input_ids.shape[1]
             
             # Skip if prompt consumes all tokens (empty completion → NaN loss)
@@ -347,7 +347,7 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
             
             # Batch tokenize with left-padding for generation
             tokenizer.padding_side = "left"
-            batch_inputs = tokenizer(eval_prompts, truncation=True, max_length=1536, 
+            batch_inputs = tokenizer(eval_prompts, truncation=True, max_length=2048, 
                                      padding=True, return_tensors="pt").to(device)
             
             # Batch generate
