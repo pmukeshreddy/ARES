@@ -293,11 +293,19 @@ class DAPOTrainer:
             used_prompt_hashes = set()    # Track which prompts we've already tried
             
             for resample_round in range(max_resample_times + 1):
-                # Use ONLY labeled data for DAPO training.
-                # Unlabeled samples get R2=0 for ALL completions, contributing
-                # only R1/R3 noise that dilutes the labeled R2 gradient signal.
-                num_labeled = min(batch_size, len(train_dataset))
-                batch = random.sample(train_dataset, num_labeled)
+                # STRATIFIED SAMPLING: always draw equal SURFACE + FILTER.
+                # Random sampling from 44%S/56%F dataset gives FILTER-heavy
+                # batches ~80% of the time, causing the gradient to consistently
+                # push toward more FILTER. Stratified ensures balanced gradient.
+                surface_pool = [x for x in train_dataset if x["label"] == 1]
+                filter_pool = [x for x in train_dataset if x["label"] == 0]
+                
+                n_per_class = batch_size // 2
+                n_surface = min(n_per_class, len(surface_pool))
+                n_filter = min(n_per_class, len(filter_pool))
+                
+                batch = random.sample(surface_pool, n_surface) + random.sample(filter_pool, n_filter)
+                random.shuffle(batch)  # Shuffle so order doesn't matter
                 for item in batch:
                     item["has_label"] = True
                 
