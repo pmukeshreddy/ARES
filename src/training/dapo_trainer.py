@@ -144,12 +144,8 @@ class DAPOTrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             
-        # We load reference model (frozen) to compute base logprobs
-        self.ref_model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            torch_dtype=torch.bfloat16,
-        ).to(self.device)
-        self.ref_model.eval()
+    # We no longer load a separate reference model. 
+    # We will use PEFT's `disable_adapter()` to get reference logprobs to save massive VRAM.
         
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
@@ -221,22 +217,13 @@ class DAPOTrainer:
                         matched += 1
             logger.info(f"SFT warm-up: matched {matched}/{len(sft_state)} keys into training model for {team_name}")
             
-            # Load SFT as reference model (apply LoRA to ref_model temporarily)
-            from peft import PeftModel
-            ref_lora = PeftModel.from_pretrained(
-                self.ref_model, 
-                str(sft_warmup_path),
-                is_trainable=False
-            )
-            ref_lora.eval()
-            self._sft_ref_model = ref_lora
-            logger.info(f"SFT warm-up loaded as KL reference model for {team_name}")
+            logger.info(f"SFT warm-up: matched {matched}/{len(sft_state)} keys into training model for {team_name}")
+            
         else:
             logger.info(f"No SFT warm-up found at {sft_warmup_path}, using random LoRA init")
             for name, param in self.model.named_parameters():
                 if "lora" in name:
                     torch.nn.init.normal_(param, std=0.01)
-            self._sft_ref_model = None
         # Compute dataset-level label counts for stable inverse class frequency weighting in R2
         surface_count = sum(1 for item in train_dataset if item.get("label") == 1)
         filter_count = sum(1 for item in train_dataset if item.get("label") == 0)
@@ -517,9 +504,9 @@ class DAPOTrainer:
                 prompt_lens = prompt_inputs.attention_mask.sum(dim=1)
                 
                 with torch.no_grad():
-                    # Use SFT ref model for KL if available (prevents FILTER collapse)
-                    ref_model = self._sft_ref_model if self._sft_ref_model is not None else self.ref_model
-                    ref_log_probs = self._get_logprobs(ref_model, inputs.input_ids, inputs.attention_mask)
+                    # Disable LoRA active adapters temporarily to get the base/SFT reference weights
+                    with self.model.disable_adapter():
+                        ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                     
                 curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                 
