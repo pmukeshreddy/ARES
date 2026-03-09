@@ -127,13 +127,34 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
     return metrics, results
 
 def main():
+    import argparse
     import yaml
-    with open("configs/default.yaml", "r") as f:
+    
+    parser = argparse.ArgumentParser(description="RLCR v2: Evaluate DAPO/KD Models")
+    parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
+    parser.add_argument("--teams", nargs="*", default=None, help="Teams to evaluate (default: all). E.g. --teams pragmatic_shippers")
+    parser.add_argument("--checkpoint-type", choices=["dapo", "kd"], default="dapo",
+                        help="Which checkpoint to evaluate: 'dapo' (per-team LoRA) or 'kd' (unified distilled LoRA)")
+    parser.add_argument("--max-samples", type=int, default=50, help="Max test samples per team")
+    args = parser.parse_args()
+    
+    with open(args.config, "r") as f:
         config_data = yaml.safe_load(f)
     
     model_name = config_data["dapo"]["model_name"]
     teams_dir = Path("data/teams")
-    checkpoints_dir = Path("checkpoints/dapo")
+    
+    # Discover teams
+    all_teams = sorted([d.name for d in teams_dir.iterdir() if d.is_dir()])
+    if args.teams:
+        teams = [t for t in args.teams if t in all_teams]
+        missing = [t for t in args.teams if t not in all_teams]
+        if missing:
+            logger.warning(f"Teams not found: {missing}. Available: {all_teams}")
+    else:
+        teams = all_teams
+    
+    logger.info(f"Evaluating {len(teams)} teams with checkpoint type: {args.checkpoint_type}")
     
     all_metrics = []
     
@@ -153,45 +174,57 @@ def main():
     
     model = None
     
-    # Process each team
-    for team_dir in teams_dir.iterdir():
-        if not team_dir.is_dir():
-            continue
-            
-        team_name = team_dir.name
-        test_file = str(team_dir / "test.jsonl")
-        lora_path = str(checkpoints_dir / f"dapo_lora_{team_name}")
-        
-        # Load adapter into the base model dynamically
-        if os.path.exists(lora_path):
-            logger.info(f"Loading LoRA weights from {lora_path} for {team_name}...")
-            if model is None:
-                model = PeftModel.from_pretrained(base_model, lora_path, adapter_name=team_name)
-            else:
-                model.load_adapter(lora_path, adapter_name=team_name)
-                model.set_adapter(team_name)
+    if args.checkpoint_type == "kd":
+        # Load unified KD LoRA once for all teams
+        kd_path = Path("checkpoints/kd_unified")
+        if kd_path.exists():
+            logger.info(f"Loading unified KD LoRA from {kd_path}...")
+            model = PeftModel.from_pretrained(base_model, str(kd_path))
         else:
-            logger.warning(f"LoRA weights not found at {lora_path}. Using base model.")
-            model = base_model
+            logger.error(f"KD checkpoint not found at {kd_path}. Run 03b_knowledge_distill.py first.")
+            sys.exit(1)
+    
+    # Process each team
+    for team_name in teams:
+        team_dir = teams_dir / team_name
+        test_file = str(team_dir / "test.jsonl")
+        
+        if args.checkpoint_type == "dapo":
+            lora_path = str(Path("checkpoints/dapo") / f"dapo_lora_{team_name}")
             
-        metrics, results = evaluate_team_lora(model, tokenizer, team_name, test_file, max_samples=50)
+            if os.path.exists(lora_path):
+                logger.info(f"Loading LoRA weights from {lora_path} for {team_name}...")
+                if model is None:
+                    model = PeftModel.from_pretrained(base_model, lora_path, adapter_name=team_name)
+                else:
+                    model.load_adapter(lora_path, adapter_name=team_name)
+                model.set_adapter(team_name)
+            else:
+                logger.warning(f"LoRA weights not found at {lora_path}. Using base model.")
+                model = base_model
+        
+        # For KD, model is already loaded — same LoRA for all teams
+            
+        metrics, results = evaluate_team_lora(model, tokenizer, team_name, test_file, max_samples=args.max_samples)
         
         if metrics:
+            metrics["checkpoint_type"] = args.checkpoint_type
             all_metrics.append(metrics)
             
             # Save raw predictions for analysis
-            out_file = f"data/teams/{team_name}/predictions.jsonl"
+            out_file = f"data/teams/{team_name}/predictions_{args.checkpoint_type}.jsonl"
             with open(out_file, "w") as f:
                 for r in results:
                     f.write(json.dumps(r) + "\n")
                     
     # Print summary
-    print("\n" + "="*50)
-    print("DAPO PHASE 2 GENERALIZATION EVALUATION SUMMARY")
-    print("="*50)
+    print("\n" + "="*60)
+    print(f"EVALUATION SUMMARY ({args.checkpoint_type.upper()} checkpoints)")
+    print("="*60)
     for m in all_metrics:
         print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | P: {m['precision']:.2f} | R: {m['recall']:.2f} | F1: {m['f1']:.2f} | Surface%: {m['surface_ratio']:.2f}")
-    print("="*50)
+    print("="*60)
 
 if __name__ == "__main__":
     main()
+
