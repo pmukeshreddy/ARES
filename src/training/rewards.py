@@ -48,11 +48,14 @@ def parse_completion(completion: str) -> dict:
 class DAPORewardScales:
     """Computes the 6 components of the DAPO reward."""
     
-    def __init__(self, tokenizer=None, precomputed_scores=None, device="cuda", config=None):
+    def __init__(self, tokenizer=None, precomputed_scores=None, device="cuda", config=None, dataset_label_counts=None):
         self.tokenizer = tokenizer
         self.precomputed_scores = precomputed_scores or {}
         self.device = device
         self.config = config or {}
+        # Precomputed dataset-level label counts for stable inverse frequency weighting
+        # Expected: {"surface": N, "filter": M}
+        self.dataset_label_counts = dataset_label_counts or {}
         
     def compute_r1_reasoning_quality(self, parsed_completions: list, diffs: list, prompts: list) -> list:
         """
@@ -107,14 +110,18 @@ class DAPORewardScales:
     def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list, has_label: list) -> list:
         """
         R2: Outcome Match
-        Asymmetric mapping with inverse class frequency weighting.
+        Symmetric penalties with dataset-level inverse class frequency weighting.
+        Uses precomputed dataset label counts (not per-batch) for stable weighting.
         """
-        batch_l1 = sum(1 for l, h in zip(ground_truth_labels, has_label) if l == 1 and h)
-        batch_l0 = sum(1 for l, h in zip(ground_truth_labels, has_label) if l == 0 and h)
-        total_labeled = batch_l1 + batch_l0
+        # Use dataset-level counts for stable weighting
+        ds_surface = self.dataset_label_counts.get("surface", 1)
+        ds_filter = self.dataset_label_counts.get("filter", 1)
+        ds_total = ds_surface + ds_filter
         
-        w1 = (total_labeled / (2.0 * max(1, batch_l1))) if total_labeled > 0 else 1.0
-        w0 = (total_labeled / (2.0 * max(1, batch_l0))) if total_labeled > 0 else 1.0
+        # Inverse frequency: minority class gets higher weight
+        # e.g., 22 SURFACE / 28 FILTER → w1=50/44=1.136, w0=50/56=0.893
+        w1 = ds_total / (2.0 * max(1, ds_surface))
+        w0 = ds_total / (2.0 * max(1, ds_filter))
         
         fp_pen = self.config.get("r2_false_positive_penalty", -1.0)
         fn_pen = self.config.get("r2_false_negative_penalty", -1.0)

@@ -237,6 +237,11 @@ class DAPOTrainer:
                 if "lora" in name:
                     torch.nn.init.normal_(param, std=0.01)
             self._sft_ref_model = None
+        # Compute dataset-level label counts for stable inverse class frequency weighting in R2
+        surface_count = sum(1 for item in train_dataset if item.get("label") == 1)
+        filter_count = sum(1 for item in train_dataset if item.get("label") == 0)
+        self.reward_scales.dataset_label_counts = {"surface": surface_count, "filter": filter_count}
+        logger.info(f"Dataset label counts for {team_name}: {surface_count} SURFACE / {filter_count} FILTER (w_surface={( surface_count + filter_count) / (2.0 * max(1, surface_count)):.3f}, w_filter={(surface_count + filter_count) / (2.0 * max(1, filter_count)):.3f})")
                 
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config["learning_rate"])
         
