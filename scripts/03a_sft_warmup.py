@@ -75,14 +75,45 @@ def create_sft_example(item: dict, tokenizer) -> str:
     return prompt_text, ideal_completion
 
 
-def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=8, batch_size=16):
-    """Use the base model as a teacher to generate content-specific reasoning for each sample.
-    
-    Batched rejection sampling — generates num_candidates completions per sample,
-    keeps the one with correct decision + best content overlap.
+def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num_candidates=8, batch_size=16):
+    """Use the base model as a teacher to generate content-specific reasoning for each sample,
+    caching the results locally to save time on subsequent runs.
     """
     import re
-    logger.info(f"Generating teacher reasoning for {len(dataset)} samples (batched, {num_candidates} candidates each)...")
+    import json
+    import hashlib
+    from pathlib import Path
+    
+    cache_path = Path("data/teacher_reasoning_cache.json")
+    cache = {}
+    if cache_path.exists():
+        try:
+            with open(cache_path, "r") as f:
+                cache = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load teacher reasoning cache: {e}")
+            
+    # Quick pass: fill in from cache, identify what needs generation
+    needs_generation = []
+    for item in dataset:
+        ex_id = item.get("example_id")
+        if not ex_id:
+            diff_snippet = item.get("diff", "")[:500]
+            comment_snippet = item.get("comment", "")[:500]
+            ex_id = hashlib.md5(f"{diff_snippet}_{comment_snippet}".encode('utf-8')).hexdigest()
+            item["example_id"] = ex_id
+            
+        cache_key = f"{team_name}_{ex_id}"
+        if cache_key in cache:
+            item["teacher_reasoning"] = cache[cache_key]
+        else:
+            needs_generation.append(item)
+            
+    if not needs_generation:
+        logger.info(f"Loaded all {len(dataset)} teacher reasonings from cache!")
+        return
+        
+    logger.info(f"Loaded {len(dataset) - len(needs_generation)} from cache. Generating {len(needs_generation)} new reasoning samples...")
     
     model.eval()
     success_count = 0
@@ -96,8 +127,8 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates
     tokenizer.padding_side = "left"
     
     with torch.no_grad():
-        for batch_start in tqdm(range(0, len(dataset), batch_size), desc="Teacher reasoning"):
-            batch_items = dataset[batch_start:batch_start + batch_size]
+        for batch_start in tqdm(range(0, len(needs_generation), batch_size), desc="Teacher reasoning"):
+            batch_items = needs_generation[batch_start:batch_start + batch_size]
             
             # Prepare prompts for batch
             prompt_texts = []
@@ -162,10 +193,25 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates
                 
                 if best_reasoning:
                     item["teacher_reasoning"] = best_reasoning
+                    cache_key = f"{team_name}_{item['example_id']}"
+                    cache[cache_key] = best_reasoning
                     success_count += 1
+                    
+                # Save cache periodically
+                if success_count % 10 == 0:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(cache_path, "w") as f:
+                        json.dump(cache, f, indent=2)
+                        
+    # Final save
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "w") as f:
+        json.dump(cache, f, indent=2)
     
     tokenizer.padding_side = "right"
-    logger.info(f"Teacher reasoning: {success_count}/{len(dataset)} content-specific ({100*success_count/len(dataset):.0f}%)")
+    logger.info(f"New generation success: {success_count}/{len(needs_generation)} content-specific ({100*success_count/max(1, len(needs_generation)):.0f}%)")
+    total_cached = sum(1 for d in dataset if "teacher_reasoning" in d)
+    logger.info(f"Total dataset coverage: {total_cached}/{len(dataset)} ({100*total_cached/len(dataset):.0f}%)")
     model.train()
 
 
@@ -208,7 +254,7 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
         logger.warning(f"SFT Warmup: {missing_scores} out of {len(raw_dataset)} samples missing from precomputed scores. (Fallback to 0.5 applied)")
     
     # Generate content-specific reasoning using teacher model (rejection sampling)
-    generate_teacher_reasoning(model, tokenizer, dataset, device, num_candidates=4)
+    generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num_candidates=4)
     teacher_count = sum(1 for d in dataset if "teacher_reasoning" in d)
     
     # DEBUG: Show training data composition
