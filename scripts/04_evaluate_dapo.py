@@ -246,8 +246,14 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
                 "votes_filter": votes_filter
             })
     
+    # Individual completion stats (matches training S:F reporting)
+    total_surface_votes = sum(r["votes_surface"] for r in results)
+    total_filter_votes = sum(r["votes_filter"] for r in results)
+    total_votes = total_surface_votes + total_filter_votes
+    completion_surface_pct = total_surface_votes / max(1, total_votes) * 100
+    print(f"\n  Individual completion stats: {total_surface_votes}S/{total_filter_votes}F ({completion_surface_pct:.0f}% SURFACE across all {total_votes} completions)")
+    
     # Check if generation actually worked
-    total_votes = sum(r["votes_surface"] + r["votes_filter"] for r in results)
     if total_votes == 0:
         logger.error("ALL completions were empty! SGLang generation is broken.")
         logger.error("Check sglang_eval.log for errors.")
@@ -295,6 +301,7 @@ def main():
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--teams", nargs="*", default=None)
     parser.add_argument("--sft", action="store_true", help="Evaluate SFT checkpoint instead of DAPO")
+    parser.add_argument("--train-data", action="store_true", help="Evaluate on train.jsonl (overfitting check)")
     parser.add_argument("--max-samples", type=int, default=50)
     parser.add_argument("--num-votes", type=int, default=8)
     args = parser.parse_args()
@@ -323,7 +330,8 @@ def main():
         all_metrics = []
         
         for team_name in teams:
-            test_file = str(teams_dir / team_name / "test.jsonl")
+            test_file = str(teams_dir / team_name / ("train.jsonl" if args.train_data else "test.jsonl"))
+            data_label = "TRAIN" if args.train_data else "TEST"
             
             if args.sft:
                 lora_path = str(Path("checkpoints/sft_warmup") / f"sft_warmup_{team_name}")
@@ -338,7 +346,7 @@ def main():
             
             # Convert to absolute path for SGLang
             lora_path = str(Path(lora_path).resolve())
-            logger.info(f"Using {label} LoRA: {lora_path}")
+            logger.info(f"Using {label} LoRA: {lora_path} on {data_label} data")
             
             metrics, results = evaluate_team(
                 team_name, test_file, lora_path, tokenizer,
