@@ -1,125 +1,196 @@
 """
-Evaluate Phase 2 DAPO Models.
+Evaluate Phase 2 DAPO Models using SGLang (same engine as training).
 
-This script runs the trained Qwen2.5-Coder-3B-Instruct model with its
-team-specific LoRA adapters on the corresponding test sets.
-It records the model's <decision> (SURFACE/FILTER) and <score> outputs,
-and calculates metrics like Accuracy, F1, and Precision/Recall.
+Uses the same SGLang server + LoRA loading as DAPO training to ensure
+generation behavior matches exactly.
 """
 
 import os
 import sys
 import json
 import logging
+import subprocess
+import time
+import requests
 from pathlib import Path
 from tqdm import tqdm
 
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-from peft import PeftModel
+import yaml
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.training.rewards import parse_completion
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
-def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_samples: int = 100):
-    """Evaluates a single team's LoRA adapter on its test dataset."""
-    logger.info(f"\n{'='*50}\nEvaluating team: {team_name}\n{'='*50}")
+SGLANG_PORT = 30000
+
+
+def start_sglang_server(model_name: str, dapo_config: dict):
+    """Starts SGLang server identical to training."""
+    logger.info(f"Starting SGLang server for {model_name} on port {SGLANG_PORT}...")
     
-    # 1. Load Data
+    lora_rank = str(dapo_config.get("lora_r", 16))
+    lora_targets = dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
+    
+    sglang_python = "/opt/sglang_venv/bin/python3"
+    
+    cmd = [
+        sglang_python, "-m", "sglang.launch_server",
+        "--model-path", model_name,
+        "--port", str(SGLANG_PORT),
+        "--trust-remote-code",
+        "--enable-lora",
+        "--max-lora-rank", lora_rank,
+        "--max-loras-per-batch", "2",
+        "--lora-target-modules"
+    ] + lora_targets + [
+        "--mem-fraction-static", "0.7",  # More memory for eval (no training)
+        "--dtype", "bfloat16"
+    ]
+    
+    log_file = open("sglang_eval.log", "w")
+    process = subprocess.Popen(cmd, stdout=log_file, stderr=log_file, text=True)
+    
+    for i in range(60):
+        try:
+            resp = requests.get(f"http://localhost:{SGLANG_PORT}/health")
+            if resp.status_code == 200:
+                logger.info("SGLang server is ready!")
+                return process
+        except Exception:
+            pass
+        time.sleep(2)
+    
+    logger.error("SGLang failed to start. Check sglang_eval.log")
+    try:
+        with open("sglang_eval.log") as f:
+            logger.error(f"Log tail:\n{f.read()[-2000:]}")
+    except Exception:
+        pass
+    process.terminate()
+    sys.exit(1)
+
+
+def load_lora(adapter_name: str, lora_path: str):
+    """Load a LoRA adapter into SGLang."""
+    url = f"http://localhost:{SGLANG_PORT}/load_lora"
+    payload = {"lora_name": adapter_name, "lora_path": lora_path}
+    resp = requests.post(url, json=payload)
+    logger.info(f"LoRA load '{adapter_name}' [{resp.status_code}]: {resp.text[:200]}")
+    return resp.status_code == 200
+
+
+def sglang_generate(prompts: list, lora_path: str, n: int = 8, max_tokens: int = 512):
+    """Generate N completions per prompt using SGLang — identical to training."""
+    from transformers import AutoTokenizer
+    # Load tokenizer once (cached by transformers)
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Coder-3B-Instruct", trust_remote_code=True)
+    
+    url = f"http://localhost:{SGLANG_PORT}/generate"
+    all_results = []
+    
+    for p in prompts:
+        messages = [
+            {"role": "system", "content": "You are a helpful AI code reviewer."},
+            {"role": "user", "content": p}
+        ]
+        formatted = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        
+        payload = {
+            "text": formatted,
+            "sampling_params": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "n": n,
+                "max_new_tokens": max_tokens
+            },
+            "lora_path": lora_path
+        }
+        
+        try:
+            resp = requests.post(url, json=payload).json()
+            if isinstance(resp, list):
+                completions = [item.get("text", "") if isinstance(item, dict) else str(item) for item in resp]
+            elif isinstance(resp, dict):
+                completions = resp.get("text", [])
+                if not isinstance(completions, list):
+                    completions = [completions]
+            else:
+                completions = []
+            
+            while len(completions) < n:
+                completions.append("")
+            all_results.append(completions[:n])
+        except Exception as e:
+            logger.error(f"SGLang generation failed: {e}")
+            all_results.append([""] * n)
+    
+    return all_results
+
+
+def evaluate_team(team_name: str, test_file: str, lora_path: str, 
+                  num_votes: int = 8, max_samples: int = 50):
+    """Evaluate a team using SGLang with majority voting."""
+    logger.info(f"\nEvaluating team: {team_name}")
+    
     if not os.path.exists(test_file):
         logger.error(f"Test file not found: {test_file}")
         return None, None
-        
+    
     dataset = []
     with open(test_file, "r") as f:
         for line in f:
             dataset.append(json.loads(line))
-            
-    # Limit samples for quicker evaluation
     dataset = dataset[:max_samples]
-    if len(dataset) == 0:
+    
+    if not dataset:
         return None, None
-        
-    logger.info(f"Loaded {len(dataset)} test samples for {team_name}")
     
-    model.eval()
+    logger.info(f"Loaded {len(dataset)} test samples")
     
-    # 3. Generate Predictions with majority voting (BATCHED)
-    num_votes = 8
-    prompt_batch_size = 8  # Process 8 prompts at once, each with 8 votes
+    # Load LoRA into SGLang
+    adapter_name = f"eval_{team_name}"
+    load_lora(adapter_name, lora_path)
+    
+    # Generate N completions per prompt in batches
+    batch_size = 8
     results = []
     
-    # Pre-format all prompts
-    all_formatted = []
-    for item in dataset:
-        messages = [
-            {"role": "system", "content": "You are a helpful AI code reviewer."},
-            {"role": "user", "content": item["prompt"]}
-        ]
-        all_formatted.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
+    for i in tqdm(range(0, len(dataset), batch_size), desc=f"Evaluating {team_name}"):
+        batch = dataset[i:i+batch_size]
+        prompts = [item["prompt"] for item in batch]
+        
+        # SGLang generates N completions per prompt natively
+        completions_grouped = sglang_generate(prompts, lora_path=adapter_name, n=num_votes)
+        
+        for b_idx, item in enumerate(batch):
+            votes_surface = 0
+            votes_filter = 0
+            first_completion = None
+            
+            for comp in completions_grouped[b_idx]:
+                parsed = parse_completion(comp)
+                if first_completion is None:
+                    first_completion = comp
+                if parsed["decision"] == "SURFACE":
+                    votes_surface += 1
+                elif parsed["decision"] == "FILTER":
+                    votes_filter += 1
+            
+            prediction = 1 if votes_surface > votes_filter else 0
+            
+            results.append({
+                "team": team_name,
+                "ground_truth_label": item["label"],
+                "predicted_label": prediction,
+                "raw_completion": first_completion or "",
+                "votes_surface": votes_surface,
+                "votes_filter": votes_filter
+            })
     
-    with torch.no_grad():
-        for i in tqdm(range(0, len(dataset), prompt_batch_size), desc=f"Evaluating {team_name}"):
-            batch_items = dataset[i:i+prompt_batch_size]
-            batch_formatted = all_formatted[i:i+prompt_batch_size]
-            actual_bs = len(batch_items)
-            
-            inputs = tokenizer(batch_formatted, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(model.device)
-            
-            # Generate: batch_size × num_votes completions in ONE call
-            # Override model's default GenerationConfig to ensure sampling params apply
-            gen_config = GenerationConfig(
-                max_new_tokens=512,
-                temperature=1.0,
-                top_p=0.95,
-                do_sample=True,
-                num_return_sequences=num_votes,
-                pad_token_id=tokenizer.pad_token_id,
-            )
-            outputs = model.generate(**inputs, generation_config=gen_config)
-            # outputs shape: (actual_bs * num_votes, seq_len)
-            # Order: [prompt0_vote0, prompt0_vote1, ..., prompt0_vote7, prompt1_vote0, ...]
-            
-            for b_idx in range(actual_bs):
-                votes_surface = 0
-                votes_filter = 0
-                first_completion = None
-                prompt_len = inputs.input_ids.shape[1]  # Full padded input length
-                
-                for v in range(num_votes):
-                    out_idx = b_idx * num_votes + v
-                    generated_ids = outputs[out_idx][prompt_len:]
-                    completion = tokenizer.decode(generated_ids, skip_special_tokens=True)
-                    parsed = parse_completion(completion)
-                    
-                    if first_completion is None:
-                        first_completion = completion
-                    if parsed["decision"] == "SURFACE":
-                        votes_surface += 1
-                    elif parsed["decision"] == "FILTER":
-                        votes_filter += 1
-                
-                prediction = 1 if votes_surface > votes_filter else 0
-                item = batch_items[b_idx]
-                
-                results.append({
-                    "team": team_name,
-                    "prompt": item["prompt"],
-                    "diff": item["diff"],
-                    "comment": item["comment"],
-                    "ground_truth_label": item["label"],
-                    "predicted_label": prediction,
-                    "predicted_score": None,
-                    "raw_completion": first_completion,
-                    "votes_surface": votes_surface,
-                    "votes_filter": votes_filter
-                })
-                
-    # 4. Calculate Metrics
+    # Metrics
     correct = sum(1 for r in results if r["ground_truth_label"] == r["predicted_label"])
     accuracy = correct / len(results)
     
@@ -130,12 +201,11 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
     precision = true_positives / max(1, (true_positives + false_positives))
     recall = true_positives / max(1, (true_positives + false_negatives))
     f1 = 2 * (precision * recall) / max(1e-6, (precision + recall))
-    
     surface_ratio = sum(1 for r in results if r["predicted_label"] == 1) / len(results)
     
     # Per-sample diagnostics
     print(f"\n  Per-sample results ({team_name}, {num_votes}-vote majority):")
-    for i, r in enumerate(results[:20]):
+    for r in results[:20]:
         gt = "SURFACE" if r["ground_truth_label"] == 1 else "FILTER"
         pred = "SURFACE" if r["predicted_label"] == 1 else "FILTER"
         match = "✓" if gt == pred else "✗"
@@ -154,74 +224,44 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
         "total_samples": len(results)
     }
     
-    logger.info(f"Team {team_name} Metrics: Acc: {accuracy:.2f}, F1: {f1:.2f}, Surface Ratio: {surface_ratio:.2f}")
+    logger.info(f"Team {team_name}: Acc={accuracy:.2f}, F1={f1:.2f}, Surface%={surface_ratio:.2f}")
     return metrics, results
 
+
 def main():
-    import argparse
-    import yaml
-    
-    parser = argparse.ArgumentParser(description="RLCR v2: Evaluate DAPO/KD Models")
+    parser = argparse.ArgumentParser(description="RLCR v2: Evaluate DAPO Models (SGLang)")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
-    parser.add_argument("--teams", nargs="*", default=None, help="Teams to evaluate (default: all). E.g. --teams pragmatic_shippers")
-    parser.add_argument("--checkpoint-type", choices=["dapo", "kd"], default="dapo",
-                        help="Which checkpoint to evaluate: 'dapo' (per-team LoRA) or 'kd' (unified distilled LoRA)")
-    parser.add_argument("--max-samples", type=int, default=50, help="Max test samples per team")
+    parser.add_argument("--teams", nargs="*", default=None)
     parser.add_argument("--sft", action="store_true", help="Evaluate SFT checkpoint instead of DAPO")
+    parser.add_argument("--max-samples", type=int, default=50)
+    parser.add_argument("--num-votes", type=int, default=8, help="Majority voting N")
     args = parser.parse_args()
+    
+    import argparse as _  # just to suppress unused warning
     
     with open(args.config, "r") as f:
         config_data = yaml.safe_load(f)
     
-    model_name = config_data["dapo"]["model_name"]
+    dapo_config = config_data["dapo"]
+    model_name = dapo_config["model_name"]
     teams_dir = Path("data/teams")
     
     # Discover teams
     all_teams = sorted([d.name for d in teams_dir.iterdir() if d.is_dir()])
     if args.teams:
         teams = [t for t in args.teams if t in all_teams]
-        missing = [t for t in args.teams if t not in all_teams]
-        if missing:
-            logger.warning(f"Teams not found: {missing}. Available: {all_teams}")
     else:
         teams = all_teams
     
-    logger.info(f"Evaluating {len(teams)} teams with checkpoint type: {args.checkpoint_type}")
+    # Start SGLang server
+    sglang_process = start_sglang_server(model_name, dapo_config)
     
-    all_metrics = []
-    
-    # Load Base Model & Tokenizer ONCE
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
+    try:
+        all_metrics = []
         
-    logger.info(f"Loading Base Model: {model_name}...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        device_map="auto" if device == "cuda" else None
-    )
-    
-    model = None
-    
-    if args.checkpoint_type == "kd":
-        # Load unified KD LoRA once for all teams
-        kd_path = Path("checkpoints/kd_unified")
-        if kd_path.exists():
-            logger.info(f"Loading unified KD LoRA from {kd_path}...")
-            model = PeftModel.from_pretrained(base_model, str(kd_path))
-        else:
-            logger.error(f"KD checkpoint not found at {kd_path}. Run 03b_knowledge_distill.py first.")
-            sys.exit(1)
-    
-    # Process each team
-    for team_name in teams:
-        team_dir = teams_dir / team_name
-        test_file = str(team_dir / "test.jsonl")
-        
-        if args.checkpoint_type == "dapo":
+        for team_name in teams:
+            test_file = str(teams_dir / team_name / "test.jsonl")
+            
             if args.sft:
                 lora_path = str(Path("checkpoints/sft_warmup") / f"sft_warmup_{team_name}")
                 label = "SFT"
@@ -229,39 +269,36 @@ def main():
                 lora_path = str(Path("checkpoints/dapo") / f"dapo_lora_{team_name}")
                 label = "DAPO"
             
-            if os.path.exists(lora_path):
-                logger.info(f"Loading {label} LoRA weights from {lora_path} for {team_name}...")
-                if model is None:
-                    model = PeftModel.from_pretrained(base_model, lora_path, adapter_name=team_name)
-                else:
-                    model.load_adapter(lora_path, adapter_name=team_name)
-                model.set_adapter(team_name)
-            else:
-                logger.warning(f"{label} weights not found at {lora_path}. Using base model.")
-                model = base_model
-        
-        # For KD, model is already loaded — same LoRA for all teams
+            if not os.path.exists(lora_path):
+                logger.warning(f"{label} checkpoint not found: {lora_path}")
+                continue
             
-        metrics, results = evaluate_team_lora(model, tokenizer, team_name, test_file, max_samples=args.max_samples)
-        
-        if metrics:
-            metrics["checkpoint_type"] = args.checkpoint_type
-            all_metrics.append(metrics)
+            # Convert to absolute path for SGLang
+            lora_path = str(Path(lora_path).resolve())
             
-            # Save raw predictions for analysis
-            out_file = f"data/teams/{team_name}/predictions_{args.checkpoint_type}.jsonl"
-            with open(out_file, "w") as f:
-                for r in results:
-                    f.write(json.dumps(r) + "\n")
-                    
-    # Print summary
-    print("\n" + "="*60)
-    print(f"EVALUATION SUMMARY ({args.checkpoint_type.upper()} checkpoints)")
-    print("="*60)
-    for m in all_metrics:
-        print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | P: {m['precision']:.2f} | R: {m['recall']:.2f} | F1: {m['f1']:.2f} | Surface%: {m['surface_ratio']:.2f}")
-    print("="*60)
+            metrics, results = evaluate_team(
+                team_name, test_file, lora_path,
+                num_votes=args.num_votes, max_samples=args.max_samples
+            )
+            
+            if metrics:
+                metrics["checkpoint_type"] = label
+                all_metrics.append(metrics)
+        
+        # Summary
+        print("\n" + "=" * 60)
+        checkpoint_label = "SFT" if args.sft else "DAPO"
+        print(f"EVALUATION SUMMARY ({checkpoint_label} checkpoints, SGLang, {args.num_votes}-vote)")
+        print("=" * 60)
+        for m in all_metrics:
+            print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | P: {m['precision']:.2f} | R: {m['recall']:.2f} | F1: {m['f1']:.2f} | Surface%: {m['surface_ratio']:.2f}")
+        print("=" * 60)
+    
+    finally:
+        logger.info("Shutting down SGLang server...")
+        sglang_process.terminate()
+        sglang_process.wait(timeout=10)
+
 
 if __name__ == "__main__":
     main()
-
