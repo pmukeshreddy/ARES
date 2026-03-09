@@ -109,20 +109,16 @@ def start_sglang_server(model_name: str, dapo_config: dict):
 
 
 def load_lora(adapter_name: str, lora_path: str):
-    """Load a LoRA adapter into SGLang and verify it loaded."""
-    url = f"{SGLANG_URL}/load_lora"
+    """Load a LoRA adapter into SGLang — same API as training."""
+    url = f"{SGLANG_URL}/load_lora_adapter"
     payload = {"lora_name": adapter_name, "lora_path": lora_path}
     logger.info(f"Loading LoRA '{adapter_name}' from {lora_path}")
     resp = requests.post(url, json=payload)
     logger.info(f"LoRA response [{resp.status_code}]: {resp.text[:500]}")
-    try:
-        resp_data = resp.json()
-        success = resp_data.get("success", False)
-    except Exception:
-        success = False
-    if not success:
+    if resp.status_code != 200:
         logger.error(f"LoRA load FAILED!")
-    return success
+        return False
+    return True
 
 
 def generate_completions(prompts: list, lora_name: str, tokenizer, n: int = 8, max_tokens: int = 512):
