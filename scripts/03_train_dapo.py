@@ -89,6 +89,7 @@ def main():
     parser = argparse.ArgumentParser(description="RLCR v2: Phase 2 DAPO Per-Team Training")
     parser.add_argument("--config", default="configs/default.yaml", help="Config file path")
     parser.add_argument("--sglang-port", type=int, default=30000, help="Local port for SGLang engine")
+    parser.add_argument("--teams", nargs="*", default=None, help="Teams to train (default: all). E.g. --teams pragmatic_shippers thorough_mentors")
     args = parser.parse_args()
     
     # Setup logging
@@ -116,8 +117,15 @@ def main():
         logger.error("Please run 'python src/data/team_dataset.py' first to generate the datasets.")
         sys.exit(1)
         
-    teams = [d.name for d in teams_dir.iterdir() if d.is_dir()]
-    logger.info(f"Discovered {len(teams)} teams: {', '.join(teams)}")
+    all_teams = sorted([d.name for d in teams_dir.iterdir() if d.is_dir()])
+    if args.teams:
+        teams = [t for t in args.teams if t in all_teams]
+        missing = [t for t in args.teams if t not in all_teams]
+        if missing:
+            logger.warning(f"Teams not found: {missing}. Available: {all_teams}")
+    else:
+        teams = all_teams
+    logger.info(f"Training {len(teams)} teams: {', '.join(teams)}")
     
     # 2. Initialize Trainer (creates base model)
     logger.info("Initializing DAPO trainer base model and LoRA adapter...")
