@@ -87,7 +87,7 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
                 votes_surface = 0
                 votes_filter = 0
                 first_completion = None
-                prompt_len = inputs.attention_mask[b_idx].sum().item()
+                prompt_len = inputs.input_ids.shape[1]  # Full padded input length
                 
                 for v in range(num_votes):
                     out_idx = b_idx * num_votes + v
