@@ -262,36 +262,8 @@ class DAPOTrainer:
         import hashlib
         
         for step in tqdm(range(max_steps), desc=f"Team {team_name} Training"):
-            num_labeled = min(batch_size // 2, len(train_dataset))
-            labeled_batch = random.sample(train_dataset, num_labeled)
-            for item in labeled_batch:
-                item["has_label"] = True
-                
-            unlabeled_batch = []
-            if len(self.unlabeled_dataset) > 0:
-                samples_needed = batch_size - len(labeled_batch)
-                unlabeled_samples = random.sample(self.unlabeled_dataset, min(samples_needed, len(self.unlabeled_dataset)))
-                for item in unlabeled_samples:
-                    # Generate prompt for unlabeled 
-                    if "prompt" not in item:
-                        from src.data.team_dataset import generate_prompt
-                        item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
-                    item["has_label"] = False
-                    item["label"] = 0 # Dummy
-                    unlabeled_batch.append(item)
-                    
-            batch = labeled_batch + unlabeled_batch
-            
-            prompts = [item["prompt"] for item in batch]
-            diffs = [item["diff"] for item in batch]
-            comments = [item["comment"] for item in batch]
-            labels = [item["label"] for item in batch]
-            has_label = [item["has_label"] for item in batch]
-            # Default to MD5 hash if example_id is missing to securely join with precomputed scores
-            example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
             
             # 1. Sync LoRA weights to SGLang every N steps (avoids deadlock + faster)
-            # Use unique paths so SGLang caches by path — no unload needed
             if step % lora_sync_interval == 0 or current_lora_name is None:
                 sync_path = f"{lora_sync_dir}_step{step}"
                 os.makedirs(sync_path, exist_ok=True)
@@ -306,98 +278,134 @@ class DAPOTrainer:
                     if os.path.exists(old_path):
                         shutil.rmtree(old_path, ignore_errors=True)
             
-            # 2. Rollout 16 samples per prompt using SGLang (oversampling)
-            # completions_grouped = List of length batch_size, where each element is a list of N strings
+            # ── DAPO Dynamic Sampling ──────────────────────────────────
+            # Instead of skipping zero-variance groups (losing gradient signal),
+            # accumulate valid groups by resampling new prompts until we reach
+            # the target batch size. This is the actual DAPO paper algorithm.
+            
             oversample_size = self.group_size * 2
-            completions_grouped = self.sglang.generate(
-                prompts=prompts,
-                lora_path=current_lora_name,
-                n=oversample_size,
-                max_tokens=self.config.get("max_new_tokens", 256),
-                tokenizer=self.tokenizer
-            )
+            max_resample_times = self.config.get("max_resample_times", 3)
+            target_valid_groups = batch_size  # Need this many groups with variance
             
-            # Flatten for processing
-            flat_prompts = []
-            flat_completions = []
-            flat_diffs = []
-            flat_comments = []
-            flat_labels = []
-            flat_example_ids = []
-            flat_has_label = []
+            accumulated_prompts = []      # List of flat prompts (each repeated oversample_size times)
+            accumulated_completions = []  # List of flat completions
+            accumulated_advantages = []   # List of flat advantages
+            used_prompt_hashes = set()    # Track which prompts we've already tried
             
-            for b_idx in range(len(batch)):
-                group_comps = completions_grouped[b_idx]
-                flat_prompts.extend([prompts[b_idx]] * oversample_size)
-                flat_completions.extend(group_comps)
-                flat_diffs.extend([diffs[b_idx]] * oversample_size)
-                flat_comments.extend([comments[b_idx]] * oversample_size)
-                flat_labels.extend([labels[b_idx]] * oversample_size)
-                flat_example_ids.extend([example_ids[b_idx]] * oversample_size)
-                flat_has_label.extend([has_label[b_idx]] * oversample_size)
-            
-            # 3. Compute Rewards
-            rewards, logs = self.reward_scales.compute_total_reward(
-                flat_completions, flat_diffs, flat_comments, flat_labels, flat_example_ids, flat_has_label, self.config, flat_prompts
-            )
-            
-            # GDPO: Per-Reward Normalization (normalize each R1-R6 independently within each group)
-            # Then sum the normalized advantages. This prevents reward signal collapse.
-            w_r1, w_r2, w_r3, w_r4, w_r5 = logs["weights"]
-            
-            r1_tensor = torch.tensor(logs["r1_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
-            r2_tensor = torch.tensor(logs["r2_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
-            r3_tensor = torch.tensor(logs["r3_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
-            r4_tensor = torch.tensor(logs["r4_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
-            r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
-            
-            def normalize_within_group(t):
-                """Normalize each row (group) independently: (x - mean) / (std + eps)"""
-                m = t.mean(dim=1, keepdim=True)
-                s = t.std(dim=1, keepdim=True)
-                return (t - m) / (s + 1e-8)
-            
-            # Per-component normalization as requested by user
-            adv_r1 = normalize_within_group(r1_tensor) * w_r1
-            adv_r2 = normalize_within_group(r2_tensor) * w_r2
-            adv_r3 = normalize_within_group(r3_tensor) * w_r3
-            adv_r4 = normalize_within_group(r4_tensor) * w_r4
-            adv_r5 = normalize_within_group(r5_tensor) * w_r5
-            
-            advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
-            
-            # Batch-wise normalization for final scaling stability
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            
-            # Dynamic sampling: replace the top/bottom 25% filtering with true DAPO variance check
-            valid_groups = []
-            for g_idx in range(advantages.size(0)):
-                # Check if total advantage has zero variance in this group
-                if advantages[g_idx].std() < 1e-5:
-                    valid_groups.append(False)
-                else:
-                    valid_groups.append(True)
+            for resample_round in range(max_resample_times + 1):
+                # Sample a fresh batch of prompts
+                num_labeled = min(batch_size // 2, len(train_dataset))
+                labeled_batch = random.sample(train_dataset, num_labeled)
+                for item in labeled_batch:
+                    item["has_label"] = True
                     
-            if sum(valid_groups) == 0:
-                continue
+                unlabeled_batch = []
+                if len(self.unlabeled_dataset) > 0:
+                    samples_needed = batch_size - len(labeled_batch)
+                    unlabeled_samples = random.sample(self.unlabeled_dataset, min(samples_needed, len(self.unlabeled_dataset)))
+                    for item in unlabeled_samples:
+                        if "prompt" not in item:
+                            from src.data.team_dataset import generate_prompt
+                            item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
+                        item["has_label"] = False
+                        item["label"] = 0
+                        unlabeled_batch.append(item)
+                        
+                batch = labeled_batch + unlabeled_batch
                 
-            flat_prompts_filtered = []
-            flat_completions_filtered = []
-            flat_advantages_filtered = []
+                prompts = [item["prompt"] for item in batch]
+                diffs = [item["diff"] for item in batch]
+                comments = [item["comment"] for item in batch]
+                labels = [item["label"] for item in batch]
+                has_label = [item["has_label"] for item in batch]
+                example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
+                
+                # 2. Rollout N completions per prompt using SGLang
+                completions_grouped = self.sglang.generate(
+                    prompts=prompts,
+                    lora_path=current_lora_name,
+                    n=oversample_size,
+                    max_tokens=self.config.get("max_new_tokens", 256),
+                    tokenizer=self.tokenizer
+                )
+                
+                # Flatten for reward computation
+                flat_prompts = []
+                flat_completions = []
+                flat_diffs = []
+                flat_comments = []
+                flat_labels = []
+                flat_example_ids = []
+                flat_has_label = []
+                
+                for b_idx in range(len(batch)):
+                    group_comps = completions_grouped[b_idx]
+                    flat_prompts.extend([prompts[b_idx]] * oversample_size)
+                    flat_completions.extend(group_comps)
+                    flat_diffs.extend([diffs[b_idx]] * oversample_size)
+                    flat_comments.extend([comments[b_idx]] * oversample_size)
+                    flat_labels.extend([labels[b_idx]] * oversample_size)
+                    flat_example_ids.extend([example_ids[b_idx]] * oversample_size)
+                    flat_has_label.extend([has_label[b_idx]] * oversample_size)
+                
+                # 3. Compute Rewards
+                rewards, logs = self.reward_scales.compute_total_reward(
+                    flat_completions, flat_diffs, flat_comments, flat_labels, flat_example_ids, flat_has_label, self.config, flat_prompts
+                )
+                
+                # GDPO: Per-Reward Normalization
+                w_r1, w_r2, w_r3, w_r4, w_r5 = logs["weights"]
+                
+                r1_tensor = torch.tensor(logs["r1_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r2_tensor = torch.tensor(logs["r2_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r3_tensor = torch.tensor(logs["r3_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r4_tensor = torch.tensor(logs["r4_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
+                
+                def normalize_within_group(t):
+                    """Normalize each row (group) independently: (x - mean) / (std + eps)"""
+                    m = t.mean(dim=1, keepdim=True)
+                    s = t.std(dim=1, keepdim=True)
+                    return (t - m) / (s + 1e-8)
+                
+                adv_r1 = normalize_within_group(r1_tensor) * w_r1
+                adv_r2 = normalize_within_group(r2_tensor) * w_r2
+                adv_r3 = normalize_within_group(r3_tensor) * w_r3
+                adv_r4 = normalize_within_group(r4_tensor) * w_r4
+                adv_r5 = normalize_within_group(r5_tensor) * w_r5
+                
+                advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
+                
+                # Collect valid (non-zero-variance) groups
+                for g_idx in range(advantages.size(0)):
+                    if advantages[g_idx].std() < 1e-5:
+                        continue  # Skip this group, will try new prompts
+                    
+                    # This group has reward variance — useful gradient signal
+                    group_advs = advantages[g_idx]
+                    for idx in range(oversample_size):
+                        flat_idx = g_idx * oversample_size + idx
+                        accumulated_prompts.append(flat_prompts[flat_idx])
+                        accumulated_completions.append(flat_completions[flat_idx])
+                        accumulated_advantages.append(group_advs[idx].item())
+                
+                n_valid = len(accumulated_advantages) // oversample_size
+                if n_valid >= target_valid_groups:
+                    break  # We have enough valid groups
+                
+                if resample_round < max_resample_times:
+                    logger.info(f"  Dynamic resample round {resample_round+1}: {n_valid}/{target_valid_groups} valid groups, resampling...")
             
-            for b_idx in range(advantages.size(0)):
-                if not valid_groups[b_idx]:
-                    continue
-                group_advs = advantages[b_idx]
-                for idx in range(oversample_size):
-                    flat_idx = b_idx * oversample_size + idx
-                    flat_prompts_filtered.append(flat_prompts[flat_idx])
-                    flat_completions_filtered.append(flat_completions[flat_idx])
-                    flat_advantages_filtered.append(group_advs[idx].item())
+            # If we still have nothing after all resample rounds, skip this step
+            if len(accumulated_advantages) == 0:
+                logger.warning(f"  Step {step}: no valid groups after {max_resample_times+1} rounds, skipping.")
+                continue
             
-            flat_prompts = flat_prompts_filtered
-            flat_completions = flat_completions_filtered
-            flat_advantages = torch.tensor(flat_advantages_filtered, dtype=torch.float32, device=self.device)
+            # Normalize accumulated advantages across all valid groups
+            flat_prompts = accumulated_prompts
+            flat_completions = accumulated_completions
+            flat_advantages = torch.tensor(accumulated_advantages, dtype=torch.float32, device=self.device)
+            flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
             
             # 5. Compute GRPO Loss & Update on the filtered sequences
             # Convert prompts + completions to tensors
