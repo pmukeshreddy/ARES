@@ -74,7 +74,7 @@ def create_sft_example(item: dict, tokenizer) -> str:
     return prompt_text, ideal_completion
 
 
-def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 3, lr: float = 5e-6):
+def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dataset: list, precomputed_scores: dict, device: str, num_epochs: int = 5, lr: float = 5e-6):
     """Runs SFT warm-up for a single team using a subset of the unlabeled data."""
     logger.info(f"\n{'='*50}\nSFT Warm-Up for team: {team_name}\n{'='*50}")
     
@@ -283,10 +283,29 @@ def main():
     )
     model = get_peft_model(base_model, lora_config)
     
-    # SFT warm-up for each team
-    from src.data.team_dataset import TEAM_PROFILES
+    # Parse --teams argument
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--teams", type=str, default=None, help="Comma-separated team names to train (snake_case)")
+    args = parser.parse_args()
     
-    for team_name, profile in TEAM_PROFILES.items():
+    # Build team list: filter by --teams if provided
+    _team_name_lookup = {k.lower().replace('-', '_'): k for k in TEAM_PROFILES}
+    if args.teams:
+        requested = [t.strip() for t in args.teams.split(",")]
+        teams_to_train = {}
+        for t in requested:
+            canonical = _team_name_lookup.get(t, t)
+            if canonical in TEAM_PROFILES:
+                teams_to_train[canonical] = TEAM_PROFILES[canonical]
+            else:
+                logger.warning(f"Unknown team: {t}, skipping.")
+        logger.info(f"Training SFT for specified teams: {list(teams_to_train.keys())}")
+    else:
+        teams_to_train = TEAM_PROFILES
+        logger.info(f"Training SFT for all teams: {list(teams_to_train.keys())}")
+    
+    for team_name, profile in teams_to_train.items():
         threshold = profile["rm_threshold"]
         
         # Reset LoRA weights for each team
