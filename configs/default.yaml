@@ -82,7 +82,7 @@ embeddings:
 
 # ─── Phase 2 DAPO ───────────
 dapo:
-  model_name: "Qwen/Qwen2.5-Coder-14B-Instruct"
+  model_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
   output_dir: "checkpoints/dapo"
   precomputed_scores_path: "data/precomputed_rm_scores.json"
   unlabeled_data_path: "data/unlabeled_pairs.json"
@@ -96,7 +96,7 @@ dapo:
   # Training
   batch_size: 2          # Reduced from 4 for 14B VRAM limits
   learning_rate: 2.0e-6
-  max_steps: 15
+  max_steps: 150
   
   # GRPO
   group_size: 4          # Reduced from 8 for 14B VRAM limits (Generates 4 rollouts instead of 8)
