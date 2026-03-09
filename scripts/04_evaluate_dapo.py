@@ -15,7 +15,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from peft import PeftModel
 
 # Add project root to path
@@ -71,15 +71,16 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
             inputs = tokenizer(batch_formatted, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(model.device)
             
             # Generate: batch_size × num_votes completions in ONE call
-            outputs = model.generate(
-                **inputs,
+            # Override model's default GenerationConfig to ensure sampling params apply
+            gen_config = GenerationConfig(
                 max_new_tokens=512,
                 temperature=1.0,
                 top_p=0.95,
                 do_sample=True,
                 num_return_sequences=num_votes,
-                pad_token_id=tokenizer.pad_token_id
+                pad_token_id=tokenizer.pad_token_id,
             )
+            outputs = model.generate(**inputs, generation_config=gen_config)
             # outputs shape: (actual_bs * num_votes, seq_len)
             # Order: [prompt0_vote0, prompt0_vote1, ..., prompt0_vote7, prompt1_vote0, ...]
             
