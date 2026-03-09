@@ -267,12 +267,10 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
     false_positives = sum(1 for r in results if r["ground_truth_label"] == 0 and r["predicted_label"] == 1)
     false_negatives = sum(1 for r in results if r["ground_truth_label"] == 1 and r["predicted_label"] == 0)
     
-    # Address Rate = Comments devs acted on (True Positives) / Total comments posted (True Positives + False Positives)
-    # This is mathematically identical to Precision.
-    address_rate = true_positives / max(1, (true_positives + false_positives))
-    recall = true_positives / max(1, (true_positives + false_negatives))
-    f1 = 2 * (address_rate * recall) / max(1e-6, (address_rate + recall))
-    surface_ratio = sum(1 for r in results if r["predicted_label"] == 1) / len(results)
+    # Address Rate = (Comments devs acted on) / (Total comments Greptile posted) × 100
+    # Comments devs acted on = true_positives (GT=1, Pred=1)
+    # Total comments Greptile posted = true_positives + false_positives (Predictions=1)
+    address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
     
     # Per-sample diagnostics
     print(f"\n  Per-sample results ({team_name}, {num_votes}-vote majority):")
@@ -289,9 +287,6 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
         "team": team_name,
         "accuracy": accuracy,
         "address_rate": address_rate,
-        "recall": recall,
-        "f1": f1,
-        "surface_ratio": surface_ratio,
         "total_samples": len(results)
     }
     
@@ -365,7 +360,7 @@ def main():
         print(f"EVALUATION SUMMARY ({checkpoint_label}, SGLang, {args.num_votes}-vote)")
         print("=" * 70)
         for m in all_metrics:
-            print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f} | R: {m['recall']:.2f} | F1: {m['f1']:.2f} | Surface%: {m['surface_ratio']:.2f}")
+            print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f}")
         print("=" * 70)
     
     finally:
@@ -376,3 +371,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    print(f"TP: {true_positives}, FP: {false_positives}, FN: {false_negatives}")
