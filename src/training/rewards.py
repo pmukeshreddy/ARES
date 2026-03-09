@@ -233,13 +233,13 @@ class DAPORewardScales:
         
         # Get weights
         if config is not None:
-            w_r1 = config.get("r1_weight", 0.20)
-            w_r2 = config.get("r2_weight", 0.35)
-            w_r3 = config.get("r3_weight", 0.15)
-            w_r4 = config.get("r4_weight", 0.15)
-            w_r5 = config.get("r5_weight", 0.15)
+            w_r1 = config.get("r1_weight", 0.10)
+            w_r2 = config.get("r2_weight", 0.60)
+            w_r3 = config.get("r3_weight", 0.10)
+            w_r4 = config.get("r4_weight", 0.10)
+            w_r5 = config.get("r5_weight", 0.10)
         else:
-            w_r1, w_r2, w_r3, w_r4, w_r5 = 0.20, 0.35, 0.15, 0.15, 0.15
+            w_r1, w_r2, w_r3, w_r4, w_r5 = 0.10, 0.60, 0.10, 0.10, 0.10
         
         # Total (weighted sum, used for logging only; GDPO normalizes per-component in trainer)
         total_rewards = []
