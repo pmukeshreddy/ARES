@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import logging
+import argparse
 import subprocess
 import time
 import requests
@@ -236,8 +237,6 @@ def main():
     parser.add_argument("--max-samples", type=int, default=50)
     parser.add_argument("--num-votes", type=int, default=8, help="Majority voting N")
     args = parser.parse_args()
-    
-    import argparse as _  # just to suppress unused warning
     
     with open(args.config, "r") as f:
         config_data = yaml.safe_load(f)
