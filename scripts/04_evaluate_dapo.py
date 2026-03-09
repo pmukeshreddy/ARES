@@ -357,4 +357,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    print(f"TP: {true_positives}, FP: {false_positives}, FN: {false_negatives}")
