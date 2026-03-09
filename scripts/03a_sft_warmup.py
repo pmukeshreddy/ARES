@@ -189,32 +189,47 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
         # ── Per-Epoch Eval ──────────────────────────────────
         model.eval()
         import re
-        correct = 0
-        n_surface_pred = 0
-        n_filter_pred = 0
-        n_invalid = 0
-        example_outputs = []
         
         with torch.no_grad():
+            # Prepare all prompts
+            eval_prompts = []
+            eval_gts = []
             for item in eval_subset:
                 prompt_text, _ = create_sft_example(item, tokenizer)
-                inputs = tokenizer(prompt_text, truncation=True, max_length=1536, return_tensors="pt").to(device)
+                eval_prompts.append(prompt_text)
+                eval_gts.append("SURFACE" if item["label"] == 1 else "FILTER")
+            
+            # Batch tokenize with left-padding for generation
+            tokenizer.padding_side = "left"
+            batch_inputs = tokenizer(eval_prompts, truncation=True, max_length=1536, 
+                                     padding=True, return_tensors="pt").to(device)
+            
+            # Batch generate
+            gen_ids = model.generate(
+                batch_inputs.input_ids,
+                attention_mask=batch_inputs.attention_mask,
+                max_new_tokens=256,
+                do_sample=True,
+                temperature=1.0,
+                top_p=0.95,
+                pad_token_id=tokenizer.eos_token_id
+            )
+            tokenizer.padding_side = "right"  # Reset
+            
+            # Parse results
+            correct = 0
+            n_surface_pred = 0
+            n_filter_pred = 0
+            n_invalid = 0
+            example_outputs = []
+            
+            for i in range(len(eval_subset)):
+                prompt_len = batch_inputs.input_ids.shape[1]
+                gen_text = tokenizer.decode(gen_ids[i][prompt_len:], skip_special_tokens=True)
                 
-                gen_ids = model.generate(
-                    inputs.input_ids, 
-                    attention_mask=inputs.attention_mask,
-                    max_new_tokens=256,
-                    do_sample=True,
-                    temperature=1.0,
-                    top_p=0.95,
-                    pad_token_id=tokenizer.eos_token_id
-                )
-                gen_text = tokenizer.decode(gen_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
-                
-                # Parse decision
                 dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL)
                 pred = dec_match.group(1).strip().upper() if dec_match else None
-                gt = "SURFACE" if item["label"] == 1 else "FILTER"
+                gt = eval_gts[i]
                 
                 if pred == "SURFACE":
                     n_surface_pred += 1
@@ -222,10 +237,8 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
                     n_filter_pred += 1
                 else:
                     n_invalid += 1
-                    
                 if pred == gt:
                     correct += 1
-                    
                 if len(example_outputs) < 3:
                     example_outputs.append((gt, pred, gen_text[:250]))
         
