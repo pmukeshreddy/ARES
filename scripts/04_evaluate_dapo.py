@@ -70,9 +70,10 @@ def evaluate_team_lora(model, tokenizer, team_name: str, test_file: str, max_sam
             # Generate
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=300,
-                temperature=0.1,  # Low temp for deterministic evaluation
-                do_sample=False,
+                max_new_tokens=512,
+                temperature=0.6,  # Moderate temp — not greedy but not random
+                top_p=0.9,
+                do_sample=True,
                 pad_token_id=tokenizer.pad_token_id
             )
             
