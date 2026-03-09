@@ -370,20 +370,12 @@ class DAPOTrainer:
                 has_label = [item["has_label"] for item in batch]
                 example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
                 
-                # DEBUG: Show batch composition
-                n_surface_gt = sum(1 for l in labels if l == 1)
-                n_filter_gt = sum(1 for l in labels if l == 0)
-                print(f"\n{'='*60}")
-                print(f"DEBUG STEP {step} (resample round {resample_round}):")
-                print(f"  Batch: {len(batch)} all labeled")
-                print(f"  Ground truth: {n_surface_gt} SURFACE / {n_filter_gt} FILTER")
-                
                 # 2. Rollout N completions per prompt using SGLang
                 completions_grouped = self.sglang.generate(
                     prompts=prompts,
                     lora_path=current_lora_name,
                     n=oversample_size,
-                    max_tokens=self.config.get("max_new_tokens", 256),
+                    max_tokens=self.config.get("max_new_tokens", 512),
                     tokenizer=self.tokenizer
                 )
                 
@@ -406,25 +398,13 @@ class DAPOTrainer:
                     flat_example_ids.extend([example_ids[b_idx]] * oversample_size)
                     flat_has_label.extend([has_label[b_idx]] * oversample_size)
                 
-                # DEBUG: Count decisions across ALL completions in this batch
+                # Count decisions across ALL completions
                 from src.training.rewards import parse_completion
                 all_decisions = [parse_completion(c)["decision"] for c in flat_completions]
                 n_surface_gen = sum(1 for d in all_decisions if d == "SURFACE")
                 n_filter_gen = sum(1 for d in all_decisions if d == "FILTER")
                 n_invalid_gen = sum(1 for d in all_decisions if d not in ("SURFACE", "FILTER"))
                 total_gen = len(all_decisions)
-                print(f"  Model outputs ({total_gen} completions): {n_surface_gen} SURFACE ({100*n_surface_gen/max(1,total_gen):.0f}%) / {n_filter_gen} FILTER ({100*n_filter_gen/max(1,total_gen):.0f}%) / {n_invalid_gen} invalid")
-                
-                # DEBUG: Per-group breakdown
-                for g_idx in range(len(batch)):
-                    group_start = g_idx * oversample_size
-                    group_end = group_start + oversample_size
-                    group_decisions = all_decisions[group_start:group_end]
-                    g_surface = sum(1 for d in group_decisions if d == "SURFACE")
-                    g_filter = sum(1 for d in group_decisions if d == "FILTER")
-                    gt_label = "SURFACE" if labels[g_idx] == 1 else "FILTER"
-                    has_lbl = "labeled" if has_label[g_idx] else "unlabeled"
-                    print(f"    Group {g_idx} [{has_lbl}, GT={gt_label}]: {g_surface}S/{g_filter}F out of {oversample_size}")
                 
                 # 3. Compute Rewards
                 rewards, logs = self.reward_scales.compute_total_reward(
@@ -441,9 +421,7 @@ class DAPOTrainer:
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
-                    """Dr.GRPO: subtract mean only, no std division.
-                    Dividing by std over-weights groups where the model is already
-                    confident (low variance), reinforcing the existing bias."""
+                    """Dr.GRPO: subtract mean only, no std division."""
                     m = t.mean(dim=1, keepdim=True)
                     return t - m
                 
@@ -455,23 +433,14 @@ class DAPOTrainer:
                 
                 advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
                 
-                # DEBUG: Per-group advantage analysis
-                print(f"  Advantage analysis per group:")
+                # Accumulate valid groups (skip zero-variance)
                 n_zero_var = 0
                 n_valid_round = 0
                 for g_idx in range(advantages.size(0)):
                     g_std = advantages[g_idx].std().item()
-                    g_mean = advantages[g_idx].mean().item()
-                    g_min = advantages[g_idx].min().item()
-                    g_max = advantages[g_idx].max().item()
-                    is_valid = g_std >= 1e-5
-                    status = "VALID" if is_valid else "ZERO-VAR (skipped)"
-                    print(f"    Group {g_idx}: std={g_std:.6f} mean={g_mean:.4f} range=[{g_min:.4f}, {g_max:.4f}] -> {status}")
-                    
-                    if not is_valid:
+                    if g_std < 1e-5:
                         n_zero_var += 1
                         continue
-                    
                     n_valid_round += 1
                     group_advs = advantages[g_idx]
                     for idx in range(oversample_size):
@@ -480,19 +449,16 @@ class DAPOTrainer:
                         accumulated_completions.append(flat_completions[flat_idx])
                         accumulated_advantages.append(group_advs[idx].item())
                 
-                print(f"  Round {resample_round}: {n_valid_round} valid / {n_zero_var} zero-var groups")
-                
                 n_valid = len(accumulated_advantages) // oversample_size
                 if n_valid >= target_valid_groups:
-                    print(f"  Accumulated {n_valid}/{target_valid_groups} valid groups. Proceeding.")
                     break
                 
                 if resample_round < max_resample_times:
-                    print(f"  Dynamic resample round {resample_round+1}: {n_valid}/{target_valid_groups} valid groups, resampling...")
+                    logger.info(f"  Step {step}: resampling ({n_valid}/{target_valid_groups} valid groups)")
             
             # If we still have nothing after all resample rounds, skip this step
             if len(accumulated_advantages) == 0:
-                logger.warning(f"  Step {step}: no valid groups after {max_resample_times+1} rounds, skipping.")
+                logger.warning(f"  Step {step}: no valid groups, skipping.")
                 continue
             
             # Normalize accumulated advantages across all valid groups
@@ -500,17 +466,11 @@ class DAPOTrainer:
             flat_completions = accumulated_completions
             flat_advantages = torch.tensor(accumulated_advantages, dtype=torch.float32, device=self.device)
             
-            # DEBUG: Show advantage distribution before normalization
-            from src.training.rewards import parse_completion as _pc
-            acc_decisions = [_pc(c)["decision"] for c in flat_completions]
-            surface_advs = [a for a, d in zip(accumulated_advantages, acc_decisions) if d == "SURFACE"]
-            filter_advs = [a for a, d in zip(accumulated_advantages, acc_decisions) if d == "FILTER"]
-            print(f"  FINAL accumulated: {len(flat_completions)} completions from {len(flat_completions)//oversample_size} valid groups")
-            print(f"    SURFACE completions: {len(surface_advs)}, mean_adv={sum(surface_advs)/max(1,len(surface_advs)):.4f}")
-            print(f"    FILTER completions:  {len(filter_advs)}, mean_adv={sum(filter_advs)/max(1,len(filter_advs)):.4f}")
-            if len(surface_advs) > 0 and len(filter_advs) > 0:
-                print(f"    → SURFACE gets {'HIGHER' if sum(surface_advs)/len(surface_advs) > sum(filter_advs)/len(filter_advs) else 'LOWER'} advantage (gradient pushes toward {'more SURFACE' if sum(surface_advs)/len(surface_advs) > sum(filter_advs)/len(filter_advs) else 'more FILTER'})")
-            print(f"{'='*60}\n")
+            # Compute S:F ratio for this step
+            sf_ratio = n_surface_gen / max(1, n_filter_gen)
+            sf_pct = 100 * n_surface_gen / max(1, total_gen)
+            ff_pct = 100 * n_filter_gen / max(1, total_gen)
+            inv_pct = 100 * n_invalid_gen / max(1, total_gen)
             
             flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
             
@@ -605,12 +565,13 @@ class DAPOTrainer:
             
             global_step += 1
             
-            if global_step % 5 == 0:
+            if global_step % 1 == 0:
                 logger.info(
                     f"Step {global_step}/{total_steps} | "
                     f"Loss: {loss_total.item():.4f} | "
-                    f"Avg R1(RM): {logs['r1']:.2f} | Avg R2(Match): {logs['r2']:.2f} | "
-                    f"Total R: {logs['total_reward']:.2f} | Format OK: {logs['valid_format_ratio']*100:.0f}%"
+                    f"S:F={sf_ratio:.2f} ({sf_pct:.0f}%S/{ff_pct:.0f}%F/{inv_pct:.0f}%inv) | "
+                    f"R2(Match): {logs['r2']:.2f} | "
+                    f"Total R: {logs['total_reward']:.2f} | Format: {logs['valid_format_ratio']*100:.0f}%"
                 )
         
         # Save final team LoRA
