@@ -97,6 +97,7 @@ dapo:
   batch_size: 4          # Increased to 4
   learning_rate: 5.0e-5
   max_steps: 50
+  lora_sync_interval: 1  # Sync to SGLang every step
   
   # GRPO
   group_size: 8          # 8 rollouts per prompt for stable reward signal
