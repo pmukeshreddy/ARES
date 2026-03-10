@@ -99,7 +99,7 @@ dapo:
   max_steps: 50
   
   # GRPO
-  group_size: 4          # Reduced from 8 for 14B VRAM limits (Generates 4 rollouts instead of 8)
+  group_size: 8          # 8 rollouts per prompt for stable reward signal
   clip_ratio_low: 0.2
   clip_ratio_high: 0.28
   dynamic_sampling: true

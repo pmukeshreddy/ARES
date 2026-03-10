@@ -102,8 +102,8 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
         
     logger.info(f"Loaded {len(lines)} total items. Beginning RM scoring and dynamic distribution...")
     
-    # We need 125 SURFACE and 125 FILTER samples per team (250 total = 50 train / 200 test)
-    TARGET_PER_CLASS = 125
+    # We need 175 SURFACE and 175 FILTER samples per team (350 total = 100 train / 250 test)
+    TARGET_PER_CLASS = 175
     
     for line in tqdm(lines, desc="Generating Team Labels"):
         # Check if all teams are fully populated
@@ -167,14 +167,14 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
                 team_data_filter[team_name].append(sample)
     
     # Save datasets
-    # The requirement is 20-50 train samples, 200+ test samples per team
+    # The requirement is 100 train samples, 200+ test samples per team
     for team_name in TEAM_PROFILES.keys():
         surfaces = team_data_surface[team_name]
         filters = team_data_filter[team_name]
         
         # Balance 50/50
         min_len = min(len(surfaces), len(filters))
-        if min_len < 125: # Need 250 total (125 each) for 50 train / 200 test
+        if min_len < 175: # Need 350 total (175 each) for 100 train / 250 test
             logger.warning(f"Team {team_name} only got {min_len*2} balanced samples. Simulation might be weak.")
             
         random.shuffle(surfaces)
@@ -186,9 +186,9 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
         # Shuffle matched dataset
         random.shuffle(samples)
         
-        # Take 50 for train, 200 for test (or whatever is available)
-        train_samples = samples[:50]
-        test_samples = samples[50:250] if len(samples) >= 250 else samples[50:]
+        # Take 100 for train, 250 for test (or whatever is available)
+        train_samples = samples[:100]
+        test_samples = samples[100:350] if len(samples) >= 350 else samples[100:]
         
         team_dir = out_dir / team_name.lower().replace("-", "_")
         team_dir.mkdir(exist_ok=True)
