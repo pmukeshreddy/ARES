@@ -446,7 +446,7 @@ class DAPOTrainer:
                     if g_std < 1e-5:
                         n_zero_var += 1
                         # Assign negative advantage to discourage getting stuck
-                        group_advs = torch.full_like(advantages[g_idx], -0.5)
+                        group_advs = torch.full_like(advantages[g_idx], -0.2)
                     else:
                         n_valid_round += 1
                         group_advs = advantages[g_idx]

@@ -185,7 +185,7 @@ class DAPORewardScales:
             
             # Decision-aware thresholds
             if dec == "FILTER":
-                threshold = int(0.4 * max_new_tokens)  # ~100 tokens
+                threshold = int(0.55 * max_new_tokens)  # ~140 tokens — enough to write the <decision> tag
             else:
                 threshold = int(0.8 * max_new_tokens)  # ~200 tokens
                 
