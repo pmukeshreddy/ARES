@@ -1,16 +1,16 @@
 """
 Phase 6: Standard Teacher-to-Student Knowledge Distillation.
 
-This script extracts the complex reasoning/formatting capabilities from a massive
-DAPO-trained model (14B Teacher) and logically transfers it to a smaller, faster
-model (3B Student) using synthetic data generation.
+This script extracts the complex reasoning/formatting capabilities from a
+DAPO-trained 3B Teacher model and transfers it to a smaller, faster
+1.5B Student model using synthetic data generation.
 
 Steps:
-1. Boot the Teacher Model (14B) in SGLang.
-2. Feed it entirely unlabeled Python code diffs (from GitHub).
+1. Boot the Teacher Model (3B + DAPO LoRA) in SGLang.
+2. Feed it code diffs from the team training data.
 3. Record the Teacher's "Gold Standard" <think>...</think> + SURFACE/FILTER outputs.
 4. Shut down the Teacher, boot PyTorch.
-5. Perform Supervised Fine-Tuning (SFT) on the Student Model (3B) using the Teacher's generated outputs.
+5. Perform Supervised Fine-Tuning (SFT) on the Student Model (1.5B) using the Teacher's generated outputs.
 """
 
 import os
@@ -47,7 +47,7 @@ def kill_existing_sglang():
     time.sleep(3)
 
 def start_sglang_teacher(teacher_model_path: str, lora_path: str = None):
-    """Boot the 14B Teacher in SGLang."""
+    """Boot the 3B Teacher in SGLang."""
     kill_existing_sglang()
     
     logger.info(f"Starting Teacher Model ({teacher_model_path}) on port {SGLANG_PORT}...")
@@ -232,8 +232,8 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
 
 def main():
     parser = argparse.ArgumentParser(description="RLCR: Big Model -> Small Model Knowledge Distillation")
-    parser.add_argument("--teacher", default="Qwen/Qwen2.5-Coder-14B-Instruct", help="Massive Model")
-    parser.add_argument("--student", default="Qwen/Qwen2.5-Coder-3B-Instruct", help="Tiny Fast Model")
+    parser.add_argument("--teacher", default="Qwen/Qwen2.5-Coder-3B-Instruct", help="DAPO-trained Teacher Model")
+    parser.add_argument("--student", default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="Tiny Fast Student Model")
     parser.add_argument("--unlabeled-data", default="data/teams/pragmatic_shippers/train.jsonl", help="Raw coding data diffs")
     parser.add_argument("--teacher-lora", default=None, help="The heavily optimized 14B DAPO LoRA weights")
     args = parser.parse_args()
@@ -264,18 +264,18 @@ def main():
         )
         
     finally:
-        logger.info("Teacher's job is done. Shutting down 14B SGLang server to free VRAM for PyTorch...")
+        logger.info("Teacher's job is done. Shutting down 3B SGLang server to free VRAM for PyTorch...")
         if sglang_process:
             sglang_process.terminate()
             sglang_process.wait(timeout=10)
     
     # 3. Force-feed the Teacher's knowledge into the 3B Student
     if synthetic_data and len(synthetic_data) > 0:
-        output_dir = str(PROJECT_ROOT / "checkpoints" / "distilled_student_3B")
+        output_dir = str(PROJECT_ROOT / "checkpoints" / "distilled_student_1.5B")
         train_student_model(args.student, synthetic_data, output_dir)
-        logger.info("\nSUCCESS: Small Model Distillation Complete. The 3B model is now incredibly smart.")
+        logger.info("\nSUCCESS: Small Model Distillation Complete. The 1.5B model now has 3B DAPO knowledge.")
     else:
-        logger.error("Failed to generate synthetic knowledge data from the 14B Teacher.")
+        logger.error("Failed to generate synthetic knowledge data from the 3B Teacher.")
 
 if __name__ == "__main__":
     main()
