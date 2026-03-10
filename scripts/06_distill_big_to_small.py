@@ -199,8 +199,6 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         lora_dropout=0.05,
         task_type="CAUSAL_LM"
     )
-    student_model = get_peft_model(model, lora_config)
-    student_model.train()
     
     logger.info("Formatting Student Dataset...")
     raw_dataset = Dataset.from_list(synthetic_data)
@@ -215,14 +213,14 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         logging_steps=10,
         warmup_steps=10,
         bf16=True,
-        save_strategy="no",
-        max_seq_length=2048
+        save_strategy="no"
     )
     
     trainer = SFTTrainer(
-        model=student_model,
+        model=model,
         args=training_args,
-        train_dataset=train_dataset
+        train_dataset=train_dataset,
+        peft_config=lora_config
     )
     
     logger.info("Initiating Neurological Knowledge Transfer (SFT)...")
