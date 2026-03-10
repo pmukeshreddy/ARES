@@ -437,16 +437,20 @@ class DAPOTrainer:
                 
                 advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
                 
-                # Accumulate valid groups (skip zero-variance)
+                # Accumulate valid groups
                 n_zero_var = 0
                 n_valid_round = 0
                 for g_idx in range(advantages.size(0)):
                     g_std = advantages[g_idx].std().item()
+                    n_valid_round += 1
+                    
                     if g_std < 1e-5:
                         n_zero_var += 1
-                        continue
-                    n_valid_round += 1
-                    group_advs = advantages[g_idx]
+                        # Assign negative advantage to discourage getting stuck
+                        group_advs = torch.full_like(advantages[g_idx], -0.5)
+                    else:
+                        group_advs = advantages[g_idx]
+                        
                     for idx in range(oversample_size):
                         flat_idx = g_idx * oversample_size + idx
                         accumulated_prompts.append(flat_prompts[flat_idx])
