@@ -55,7 +55,7 @@ def main():
     
     logger.info(f"Targeting up to {args.max_samples} examples. Processing in streaming batches...")
     
-    batch_size = 32
+    batch_size = 128
     current_batch = []
     processed_count = 0
     
