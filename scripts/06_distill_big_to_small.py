@@ -189,7 +189,7 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
     model = AutoModelForCausalLM.from_pretrained(
         student_model_name,
         device_map="auto",
-        torch_dtype=torch.bfloat16
+        dtype=torch.bfloat16
     )
     
     lora_config = LoraConfig(
@@ -215,15 +215,14 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         logging_steps=10,
         warmup_steps=10,
         bf16=True,
-        save_strategy="no"
+        save_strategy="no",
+        max_seq_length=2048
     )
     
     trainer = SFTTrainer(
         model=student_model,
         args=training_args,
-        train_dataset=train_dataset,
-        max_seq_length=2048,
-        packing=False
+        train_dataset=train_dataset
     )
     
     logger.info("Initiating Neurological Knowledge Transfer (SFT)...")
