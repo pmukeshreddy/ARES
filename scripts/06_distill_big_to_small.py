@@ -222,7 +222,6 @@ def train_student_model(student_model_name: str, synthetic_data: list, output_di
         model=student_model,
         args=training_args,
         train_dataset=train_dataset,
-        dataset_text_field="text",
         max_seq_length=2048,
         packing=False
     )
