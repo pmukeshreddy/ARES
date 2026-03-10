@@ -116,7 +116,7 @@ def load_team_data(file_path: Path, target_team: str):
         for line in f:
             item = json.loads(line)
             # Support both team_id and team keys depending on data version
-            team_val = item.get("team_id") or item.get("team")
+            team_val = item.get("repo_name")
             if team_val == target_team:
                 data.append(item)
     return data
@@ -269,7 +269,7 @@ def main():
     with open(train_file, "r") as f:
         for line in f:
             item = json.loads(line)
-            team_val = item.get("team_id") or item.get("team")
+            team_val = item.get("repo_name")
             if team_val:
                  all_teams.add(team_val)
                  
