@@ -608,18 +608,31 @@ class DAPOTrainer:
                     gen_log_probs = F.log_softmax(gen_logits, dim=-1)
                     token_entropy = -(gen_probs * gen_log_probs).sum(dim=-1)  # H per position
                     
-                    # Loss = -min(surr1, surr2) + kl_weight*KL - β*H(π)
-                    # Subtracting entropy bonus ENCOURAGES higher entropy (more exploration)
-                    token_loss = -torch.min(surr1, surr2).mean() + kl_penalty_weight * kl.mean() - entropy_bonus_weight * token_entropy.mean()
+                    # HIGH-ENTROPY TOKEN MASK: only train on top 20% tokens
+                    rho = 0.2
+                    n_tokens = token_entropy.size(0)
+                    k = max(1, int(n_tokens * rho))
+                    entropy_threshold = torch.topk(token_entropy, k).values[-1]
+                    entropy_mask = (token_entropy >= entropy_threshold).float()
+                    
+                    # Apply mask to surrogate loss
+                    surr_min = torch.min(surr1, surr2)
+                    weighted_surr = -(surr_min * entropy_mask).sum() / max(1.0, entropy_mask.sum())
+                    
+                    # KL and entropy bonus only on masked tokens too
+                    masked_kl = (kl * entropy_mask).sum() / max(1.0, entropy_mask.sum())
+                    masked_entropy = (token_entropy * entropy_mask).sum() / max(1.0, entropy_mask.sum())
+                    
+                    token_loss = weighted_surr + kl_penalty_weight * masked_kl - entropy_bonus_weight * masked_entropy
                     mb_loss += token_loss
                     mb_valid_tokens += 1
                     
                     # 5. Inside the per-token loss, log the actual loss components once per step:
                     if mb_idx == 0 and idx == 0:
                         logger.info(
-                            f"  DEBUG Loss components: surr={-torch.min(surr1, surr2).mean().item():.4f}, "
-                            f"kl={kl_penalty_weight * kl.mean().item():.4f}, "
-                            f"entropy={entropy_bonus_weight * token_entropy.mean().item():.4f}, "
+                            f"  DEBUG Loss components: surr={weighted_surr.item():.4f}, "
+                            f"kl={kl_penalty_weight * masked_kl.item():.4f}, "
+                            f"entropy={entropy_bonus_weight * masked_entropy.item():.4f}, "
                             f"total={token_loss.item():.4f}, "
                             f"mean_ratio={ratio.mean().item():.4f}, "
                             f"clipped_frac={(( ratio > 1.0 + self.clip_ratio_high) | (ratio < 1.0 - self.clip_ratio_low)).float().mean().item():.2f}"
