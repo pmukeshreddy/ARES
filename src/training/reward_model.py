@@ -301,6 +301,7 @@ class RewardModel(nn.Module):
             model_name,
             torch_dtype=dtype,
             trust_remote_code=True,
+            attn_implementation="flash_attention_2",
             device_map=None,
         )
         base_model.config.use_cache = False
