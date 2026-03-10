@@ -83,7 +83,6 @@ def generate_base_completion(prompts: list, tokenizer, max_tokens: int = 512):
     completions = []
     
     for p_idx, p in enumerate(prompts):
-        # We assume `p` here is just the raw diff string.
         messages = [
             {"role": "system", "content": "You are a helpful AI code reviewer. Please review the following code diff and provide a constructive comment."},
             {"role": "user", "content": p}
@@ -160,14 +159,11 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
     
     results = []
     
-    # Generate fresh comments from diffs using Base LLM
-    diffs = [item["diff"] for item in dataset]
-    logger.info("Generating base comments from diffs via SGLang...")
-    generated_comments = generate_base_completion(diffs, tokenizer)
-    
-    logger.info("Embedding generated test comments for KNN lookup...")
+    # Embed raw test comments directly — no LLM involvement
+    raw_comments = [item["comment"] for item in dataset]
+    logger.info("Embedding raw test comments for KNN lookup...")
     with torch.no_grad():
-        test_embeddings = embedder.encode(generated_comments, convert_to_tensor=True)
+        test_embeddings = embedder.encode(raw_comments, convert_to_tensor=True)
         test_embeddings = F.normalize(test_embeddings, p=2, dim=1)
         
         # Move db tensors to same device as test embeddings
@@ -201,7 +197,7 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
             "predicted_label": pred,
             "top_sim": top_sim,
             "knn_votes": f"{n_surface_neighbors}S/{n_filter_neighbors}F",
-            "comment_snippet": generated_comments[t_idx][:80],
+            "comment_snippet": item["comment"][:80],
         })
             
     # Metrics Calculation
@@ -246,7 +242,6 @@ def main():
     with open(args.config, "r") as f:
         config_data = yaml.safe_load(f)
         
-    model_name = config_data["dapo"]["model_name"]
     embedder_name = config_data["embeddings"]["model_name"]
     
     teams_dir = PROJECT_ROOT / "data" / "teams"
@@ -257,42 +252,31 @@ def main():
     logger.info(f"Loading SentenceTransformer for KNN Vector Search: {embedder_name}")
     embedder = SentenceTransformer(embedder_name, device=args.device)
     
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    
-    sglang_process = start_sglang_server(model_name)
-    
-    try:
-        all_metrics = []
-        for team_name in teams:
-            test_file = str(teams_dir / team_name / "test.jsonl")
-            
-            # Pre-compute individual embeddings for KNN Vector DB
-            db_embeddings, db_labels = compute_team_embeddings(team_name, embedder, config_data)
-            
-            if db_embeddings is None:
-                continue
-                
-            metrics, _ = evaluate_greptile_baseline(
-                team_name, test_file, tokenizer=tokenizer, embedder=embedder,
-                db_embeddings=db_embeddings, db_labels=db_labels, k=args.k
-            )
-            
-            if metrics:
-                all_metrics.append(metrics)
-                
-        # Print Summary Panel identically to DAPO eval
-        print("\n" + "=" * 60)
-        print("EVALUATION SUMMARY (Greptile KNN k=3 Baseline)")
-        print("=" * 70)
-        for m in all_metrics:
-            print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f}")
-        print("=" * 70)
+    all_metrics = []
+    for team_name in teams:
+        test_file = str(teams_dir / team_name / "test.jsonl")
         
-    finally:
-        logger.info("Shutting down SGLang server...")
-        sglang_process.terminate()
-        sglang_process.wait(timeout=10)
+        # Pre-compute individual embeddings for KNN Vector DB
+        db_embeddings, db_labels = compute_team_embeddings(team_name, embedder, config_data)
+        
+        if db_embeddings is None:
+            continue
+            
+        metrics, _ = evaluate_greptile_baseline(
+            team_name, test_file, tokenizer=None, embedder=embedder,
+            db_embeddings=db_embeddings, db_labels=db_labels, k=args.k
+        )
+        
+        if metrics:
+            all_metrics.append(metrics)
+            
+    # Print Summary Panel identically to DAPO eval
+    print("\n" + "=" * 60)
+    print("EVALUATION SUMMARY (Greptile KNN k=3 Baseline)")
+    print("=" * 70)
+    for m in all_metrics:
+        print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f}")
+    print("=" * 70)
 
 if __name__ == "__main__":
     main()
