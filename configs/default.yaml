@@ -95,16 +95,16 @@ dapo:
   
   # Training
   batch_size: 2          # Reduced from 4 for 14B VRAM limits
-  learning_rate: 2.0e-6
+  learning_rate: 5.0e-7
   max_steps: 50
   
   # GRPO
   group_size: 8          # 8 rollouts per prompt for stable reward signal
-  clip_ratio_low: 0.2
-  clip_ratio_high: 0.28
+  clip_ratio_low: 0.15
+  clip_ratio_high: 0.20
   dynamic_sampling: true
   token_level_loss: true
-  kl_penalty: 0.01
+  kl_penalty: 0.05
   entropy_bonus: 0.03    # Token-level entropy bonus to prevent policy collapse
   max_new_tokens: 256
   
