@@ -46,7 +46,7 @@ def start_sglang_server(model_name: str):
     kill_existing_sglang()
     
     logger.info(f"Starting Base Model SGLang server for {model_name} on port {SGLANG_PORT}...")
-    sglang_python = "/opt/sglang_venv/bin/python3"
+    sglang_python = sys.executable
     
     cmd = [
         sglang_python, "-m", "sglang.launch_server",
