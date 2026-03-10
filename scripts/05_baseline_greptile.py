@@ -111,47 +111,40 @@ def generate_base_completion(prompts: list, tokenizer, max_tokens: int = 512):
     return completions
 
 def compute_team_embeddings(team_name: str, embedder, config_data):
-    """Builds the Vector Database (average centroids) for the team's historical SURFACE and FILTER comments."""
+    """Builds the KNN Vector Database from team's raw historical comments (individual points, not centroid)."""
     train_file = PROJECT_ROOT / "data" / "teams" / team_name / "train.jsonl"
     if not train_file.exists():
         logger.error(f"Training data (Vector DB) not found for team {team_name}")
         return None, None
         
-    surface_comments = []
-    filter_comments = []
+    comments = []
+    labels = []
     
     with open(train_file, "r") as f:
         for line in f:
             item = json.loads(line)
-            if item["label"] == 1:
-                surface_comments.append(item["comment"])
-            else:
-                filter_comments.append(item["comment"])
+            comments.append(item["comment"])
+            labels.append(item["label"])
                 
-    logger.info(f"Team '{team_name}' Vector Database: {len(surface_comments)} SURFACE comments, {len(filter_comments)} FILTER comments.")
+    n_surface = sum(1 for l in labels if l == 1)
+    n_filter = sum(1 for l in labels if l == 0)
+    logger.info(f"Team '{team_name}' Vector Database: {n_surface} SURFACE, {n_filter} FILTER individual comment embeddings.")
     
-    if not surface_comments or not filter_comments:
+    if not comments:
         return None, None
         
-    # Create the Vector Database
-    logger.info("Computing embeddings for historical Vector DB...")
+    logger.info("Computing individual embeddings for KNN Vector DB...")
     with torch.no_grad():
-        surface_embeddings = embedder.encode(surface_comments, convert_to_tensor=True)
-        filter_embeddings = embedder.encode(filter_comments, convert_to_tensor=True)
+        embeddings = embedder.encode(comments, convert_to_tensor=True)
+        embeddings = F.normalize(embeddings, p=2, dim=1)
         
-        # We compute the 'Centroid' (average vector location) of the two clusters
-        # A real vector DB does KNN on individual points, but cosine to centroid is mathematically identical for scaled categorization
-        surface_centroid = surface_embeddings.mean(dim=0)
-        filter_centroid = filter_embeddings.mean(dim=0)
-        
-        # Normalize centroids for cosine similarity
-        surface_centroid = F.normalize(surface_centroid, p=2, dim=0)
-        filter_centroid = F.normalize(filter_centroid, p=2, dim=0)
-        
-    return surface_centroid, filter_centroid
+    labels_tensor = torch.tensor(labels, dtype=torch.long)
+    return embeddings, labels_tensor
 
-def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedder, surface_centroid, filter_centroid, max_samples: int = 50):
-    """Runs the RAG similarity search evaluation."""
+def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedder, db_embeddings, db_labels, max_samples: int = 50, k: int = 3):
+    """Runs KNN k=3 evaluation directly on raw comments — no LLM generation.
+    Default: SURFACE (pass-through). Only filters if k nearest neighbors majority are FILTER.
+    """
     logger.info(f"\n{'='*50}\nEvaluating Greptile Architecture for team: {team_name}\n{'='*50}")
     
     dataset = []
@@ -165,46 +158,43 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
     logger.info(f"Loaded {len(dataset)} test samples (GT: {n_gt_surface} SURFACE / {n_gt_filter} FILTER)")
     
     results = []
-    batch_size = 4
     
-    for i in tqdm(range(0, len(dataset), batch_size), desc=f"Evaluating Greptile for {team_name}"):
-        batch = dataset[i:i+batch_size]
-        prompts = [item["prompt"] for item in batch]
+    # Embed raw test comments directly — no LLM involvement
+    raw_comments = [item["comment"] for item in dataset]
+    logger.info("Embedding raw test comments for KNN lookup...")
+    with torch.no_grad():
+        test_embeddings = embedder.encode(raw_comments, convert_to_tensor=True)
+        test_embeddings = F.normalize(test_embeddings, p=2, dim=1)
         
-        # 1. Base Model Generation (No LoRA knowledge of the team)
-        generated_comments = generate_base_completion(prompts, tokenizer)
+        # Compute cosine similarity matrix: (n_test, n_db)
+        sim_matrix = torch.matmul(test_embeddings, db_embeddings.T)
+    
+    for t_idx, item in enumerate(tqdm(dataset, desc=f"KNN lookup for {team_name}")):
+        # Get top-k nearest neighbors from the historical DB
+        sims = sim_matrix[t_idx]  # shape: (n_db,)
+        topk_indices = torch.topk(sims, k=min(k, len(db_labels))).indices
+        topk_labels = db_labels[topk_indices]
         
-        # 2. Embedding similarity matching
-        with torch.no_grad():
-            gen_embeddings = embedder.encode(generated_comments, convert_to_tensor=True)
-            gen_embeddings = F.normalize(gen_embeddings, p=2, dim=1)
-            
-            # 3. Compute Cosine Similarity to both clusters
-            sim_to_surface = torch.matmul(gen_embeddings, surface_centroid)
-            sim_to_filter = torch.matmul(gen_embeddings, filter_centroid)
-            
-        for b_idx, item in enumerate(batch):
-            sim_S = sim_to_surface[b_idx].item()
-            sim_F = sim_to_filter[b_idx].item()
-            
-            # The architectural threshold logic:
-            # If the generated comment is mathematically closer in semantic 
-            # space to historically ignored comments, silently filter it.
-            if sim_S > sim_F:
-                pred = 1
-                decision = "SURFACE"
-            else:
-                pred = 0
-                decision = "FILTER"
-                
-            results.append({
-                "team": team_name,
-                "ground_truth_label": item["label"],
-                "predicted_label": pred,
-                "sim_S": sim_S,
-                "sim_F": sim_F,
-                "raw_completion": generated_comments[b_idx],
-            })
+        n_filter_neighbors = (topk_labels == 0).sum().item()
+        n_surface_neighbors = (topk_labels == 1).sum().item()
+        
+        # Only suppress if majority of k neighbors are FILTER (Greptile pass-through default = SURFACE)
+        if n_filter_neighbors > n_surface_neighbors:
+            pred = 0
+            decision = "FILTER"
+        else:
+            pred = 1
+            decision = "SURFACE"  # Default: pass through
+        
+        top_sim = sims[topk_indices[0]].item()
+        results.append({
+            "team": team_name,
+            "ground_truth_label": item["label"],
+            "predicted_label": pred,
+            "top_sim": top_sim,
+            "knn_votes": f"{n_surface_neighbors}S/{n_filter_neighbors}F",
+            "comment_snippet": item["comment"][:80],
+        })
             
     # Metrics Calculation
     correct = sum(1 for r in results if r["ground_truth_label"] == r["predicted_label"])
@@ -226,13 +216,7 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
         gt = "SURFACE" if r["ground_truth_label"] == 1 else "FILTER"
         pred = "SURFACE" if r["predicted_label"] == 1 else "FILTER"
         match = "✓" if gt == pred else "✗"
-        # Extract just the first line or meaningful snippet of the raw generation
-        snippet = r["raw_completion"].split('\n')[0][:80]
-        
-        # Trace the mathematical vector decision
-        vector_logic = f"[S:{r['sim_S']:.2f} | F:{r['sim_F']:.2f}]"
-        
-        print(f"    [{match}] GT={gt:7s} | Vector Math={vector_logic} -> Decision: {pred:7s} | {snippet}...")
+        print(f"    [{match}] GT={gt:7s} | KNN={r['knn_votes']:7s} | TopSim={r['top_sim']:.2f} -> Decision: {pred:7s} | {r['comment_snippet']}...")
         
     metrics = {
         "team": team_name,
@@ -244,16 +228,16 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
     return metrics, results
 
 def main():
-    parser = argparse.ArgumentParser(description="RLCR v2: Greptile RAG/Vector Embedding Baseline")
+    parser = argparse.ArgumentParser(description="RLCR v2: Greptile KNN Baseline")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--teams", nargs="*", default=None)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--k", type=int, default=3, help="KNN k neighbors")
     args = parser.parse_args()
     
     with open(args.config, "r") as f:
         config_data = yaml.safe_load(f)
         
-    model_name = config_data["dapo"]["model_name"]
     embedder_name = config_data["embeddings"]["model_name"]
     
     teams_dir = PROJECT_ROOT / "data" / "teams"
@@ -261,45 +245,34 @@ def main():
     teams = [t for t in args.teams if t in all_teams] if args.teams else all_teams
     
     # Initialize Embedder (the "Greptile Vector Database" engine)
-    logger.info(f"Loading SentenceTransformer for Vector Search: {embedder_name}")
+    logger.info(f"Loading SentenceTransformer for KNN Vector Search: {embedder_name}")
     embedder = SentenceTransformer(embedder_name, device=args.device)
     
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    
-    sglang_process = start_sglang_server(model_name)
-    
-    try:
-        all_metrics = []
-        for team_name in teams:
-            test_file = str(teams_dir / team_name / "test.jsonl")
-            
-            # Pre-compute internal clustering centroids acting as the Vector DB historical trace
-            surface_c, filter_c = compute_team_embeddings(team_name, embedder, config_data)
-            
-            if surface_c is None:
-                continue
-                
-            metrics, _ = evaluate_greptile_baseline(
-                team_name, test_file, tokenizer, embedder, 
-                surface_c, filter_c
-            )
-            
-            if metrics:
-                all_metrics.append(metrics)
-                
-        # Print Summary Panel identically to DAPO eval
-        print("\n" + "=" * 60)
-        print("EVALUATION SUMMARY (Greptile RAG Baseline)")
-        print("=" * 70)
-        for m in all_metrics:
-            print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f}")
-        print("=" * 70)
+    all_metrics = []
+    for team_name in teams:
+        test_file = str(teams_dir / team_name / "test.jsonl")
         
-    finally:
-        logger.info("Shutting down SGLang server...")
-        sglang_process.terminate()
-        sglang_process.wait(timeout=10)
+        # Pre-compute individual embeddings for KNN Vector DB
+        db_embeddings, db_labels = compute_team_embeddings(team_name, embedder, config_data)
+        
+        if db_embeddings is None:
+            continue
+            
+        metrics, _ = evaluate_greptile_baseline(
+            team_name, test_file, tokenizer=None, embedder=embedder,
+            db_embeddings=db_embeddings, db_labels=db_labels, k=args.k
+        )
+        
+        if metrics:
+            all_metrics.append(metrics)
+            
+    # Print Summary Panel identically to DAPO eval
+    print("\n" + "=" * 60)
+    print("EVALUATION SUMMARY (Greptile KNN k=3 Baseline)")
+    print("=" * 70)
+    for m in all_metrics:
+        print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f}")
+    print("=" * 70)
 
 if __name__ == "__main__":
     main()
