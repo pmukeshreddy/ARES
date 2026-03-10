@@ -253,8 +253,8 @@ def evaluate(test_file: str, lora_path: str, tokenizer, num_votes: int = 8, max_
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate distilled 3B student model")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-3B-Instruct", help="Student base model")
-    parser.add_argument("--lora-path", default="checkpoints/distilled_student_3B", help="Path to distilled LoRA")
+    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="Student base model")
+    parser.add_argument("--lora-path", default="checkpoints/distilled_student_1.5B", help="Path to distilled LoRA")
     parser.add_argument("--test-data", default="data/teams/pragmatic_shippers/test.jsonl", help="Test data file")
     parser.add_argument("--max-samples", type=int, default=50)
     parser.add_argument("--num-votes", type=int, default=8)
