@@ -75,20 +75,27 @@ def main():
     
     logger.info(f"Setting up Multi-Worker Streaming Dataset...")
     
-    # 1. Load the huge 10GB file using underlying Rust/C++ iterators via streaming
-    dataset = load_dataset("json", data_files=base_data, split="train", streaming=True)
+    # 1. Load the huge 10GB file using the safe TEXT iterator via streaming
+    # This prevents the HuggingFace JSON backend from crashing on unstructured/ragged JSON keys
+    dataset = load_dataset("text", data_files=base_data, split="train", streaming=True)
     dataset = dataset.take(args.max_samples)
     
     # 2. Setup the CPU tokenization mapping function
     def tokenize_and_format(examples):
-        # Safely extract what we need, ignoring all other unstructured keys (like comment_type)
-        diffs = examples.get("diff_hunk", []) 
-        comments = examples.get("comment", [])
-        example_ids = examples.get("example_id", [])
+        diffs = []
+        comments = []
+        example_ids = []
+        
+        # Safely parse each JSON row string manually to ignore unstructured columns
+        for line in examples["text"]:
+            data = json.loads(line)
+            diffs.append(data.get("diff_hunk", ""))
+            comments.append(data.get("comment", ""))
+            example_ids.append(data.get("example_id", None))
         
         final_ids = []
         for i in range(len(diffs)):
-            if i < len(example_ids) and example_ids[i] is not None:
+            if example_ids[i] is not None:
                 final_ids.append(example_ids[i])
             else:
                 final_ids.append(hashlib.md5(f"{diffs[i]}_{comments[i]}".encode('utf-8')).hexdigest())
@@ -111,7 +118,8 @@ def main():
         }
 
     # 3. Apply the mapping to the streaming dataset
-    tokenized_dataset = dataset.map(tokenize_and_format, batched=True, batch_size=1000, remove_columns=dataset.column_names)
+    # We must remove the "text" column since the model doesn't expect it
+    tokenized_dataset = dataset.map(tokenize_and_format, batched=True, batch_size=1000, remove_columns=["text"])
     
     # 4. Wrap with PyTorch DataLoader
     dataloader = DataLoader(
