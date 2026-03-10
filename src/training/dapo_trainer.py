@@ -224,6 +224,12 @@ class DAPOTrainer:
             for name, param in self.model.named_parameters():
                 if "lora" in name:
                     torch.nn.init.normal_(param, std=0.01)
+                    
+        # After loading SFT warmup, save a frozen copy of SFT LoRA state
+        self.sft_ref_state = {}
+        for name, param in self.model.named_parameters():
+            if "lora" in name:
+                self.sft_ref_state[name] = param.data.clone()
         # Compute dataset-level label counts for stable inverse class frequency weighting in R2
         surface_count = sum(1 for item in train_dataset if item.get("label") == 1)
         filter_count = sum(1 for item in train_dataset if item.get("label") == 0)
@@ -508,9 +514,20 @@ class DAPOTrainer:
                 prompt_lens = prompt_inputs.attention_mask.sum(dim=1)
                 
                 with torch.no_grad():
-                    # Disable LoRA active adapters temporarily to get the base/SFT reference weights
-                    with self.model.disable_adapter():
-                        ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                    # 1. Save current LoRA weights
+                    current_state = {n: p.data.clone() for n, p in self.model.named_parameters() if "lora" in n}
+                    # 2. Load SFT ref weights
+                    for n, p in self.model.named_parameters():
+                        if "lora" in n:
+                            p.data.copy_(self.sft_ref_state[n])
+                    
+                    # 3. Compute ref logprobs
+                    ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                    
+                    # 4. Restore current weights
+                    for n, p in self.model.named_parameters():
+                        if "lora" in n:
+                            p.data.copy_(current_state[n])
                     
                 curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                 
