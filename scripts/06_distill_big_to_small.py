@@ -235,7 +235,7 @@ def main():
     parser.add_argument("--teacher", default="Qwen/Qwen2.5-Coder-3B-Instruct", help="DAPO-trained Teacher Model")
     parser.add_argument("--student", default="Qwen/Qwen2.5-Coder-1.5B-Instruct", help="Tiny Fast Student Model")
     parser.add_argument("--unlabeled-data", default="data/teams/pragmatic_shippers/train.jsonl", help="Raw coding data diffs")
-    parser.add_argument("--teacher-lora", default=None, help="The heavily optimized 14B DAPO LoRA weights")
+    parser.add_argument("--teacher-lora", default=None, help="The DAPO-trained 3B LoRA weights")
     args = parser.parse_args()
     
     teacher_lora_path = None
