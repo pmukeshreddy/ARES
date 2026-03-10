@@ -225,15 +225,9 @@ class DAPOTrainer:
                 if "lora" in name:
                     torch.nn.init.normal_(param, std=0.01)
                     
-        # After loading SFT warmup, save a frozen copy of SFT LoRA state
-        self.sft_ref_state = {}
-        for name, param in self.model.named_parameters():
-            if "lora" in name:
-                self.sft_ref_state[name] = param.data.clone()
-        
-        # 1. After SFT ref state save - verify the ref weights are actually different from base:
-        sft_norm = sum(p.norm().item() for p in self.sft_ref_state.values())
-        logger.info(f"SFT ref state total norm: {sft_norm:.4f}, num keys: {len(self.sft_ref_state)}")
+        # We don't need to manually save sft_ref_state. The self.model starts with the SFT weights.
+        # When we apply LoRA, the "base model" underneath PEFT IS the SFT-warmup model.
+        # So `with self.model.disable_adapter():` will evaluate using the exact SFT weights!
         
         # Compute dataset-level label counts for stable inverse class frequency weighting in R2
         surface_count = sum(1 for item in train_dataset if item.get("label") == 1)
@@ -540,22 +534,12 @@ class DAPOTrainer:
                 # The sum of mask gives the exact index where generation starts (since it's 0-indexed)
                 prompt_lens = prompt_inputs.attention_mask.sum(dim=1)
                 
+                # Calculate logprobs using SFT reference (disable_adapter bypasses active LoRA)
                 with torch.no_grad():
-                    # 1. Save current LoRA weights
-                    current_state = {n: p.data.clone() for n, p in self.model.named_parameters() if "lora" in n}
-                    # 2. Load SFT ref weights
-                    for n, p in self.model.named_parameters():
-                        if "lora" in n:
-                            p.data.copy_(self.sft_ref_state[n])
+                    with self.model.disable_adapter():
+                        ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                     
-                    # 3. Compute ref logprobs
-                    ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
-                    
-                    # 4. Restore current weights
-                    for n, p in self.model.named_parameters():
-                        if "lora" in n:
-                            p.data.copy_(current_state[n])
-                    
+                # Calculate logprobs using active policy (current LoRA weights)
                 curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                 
                 # 2. Inside the micro-batch loop, after computing ref and curr logprobs - verify KL is sane:
