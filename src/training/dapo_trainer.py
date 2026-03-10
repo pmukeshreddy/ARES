@@ -645,6 +645,21 @@ class DAPOTrainer:
                     loss_total_logging += mb_loss.item()
             
             # Step after accumulating all micro-batches
+            grads_norm = 0.0
+            n_frozen = 0
+            n_active = 0
+            for name, param in self.model.named_parameters():
+                if "lora" in name:
+                    if param.grad is not None:
+                        grads_norm += param.grad.data.norm(2).item() ** 2
+                        n_active += 1
+                        if global_step == 0 and n_active <= 3:
+                            logger.info(f"  DEBUG active grad: {name} norm = {param.grad.data.norm(2).item():.4f}")
+                    else:
+                        n_frozen += 1
+            grads_norm = grads_norm ** 0.5
+            logger.info(f"  DEBUG Pre-Step: grad_norm={grads_norm:.4f}, active_lora_tensors={n_active}, frozen_lora_tensors={n_frozen}")
+
             optimizer.step()
             loss_total = torch.tensor(loss_total_logging / num_microbatches)
             
