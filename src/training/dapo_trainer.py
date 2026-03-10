@@ -488,8 +488,7 @@ class DAPOTrainer:
             
             address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
             
-            adv_std = flat_advantages.std() + 1e-8
-            flat_advantages = flat_advantages / adv_std
+            flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
             
             # 5. Compute GRPO Loss & Update on the filtered sequences
             # Convert prompts + completions to tensors
