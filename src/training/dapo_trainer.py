@@ -230,6 +230,11 @@ class DAPOTrainer:
         for name, param in self.model.named_parameters():
             if "lora" in name:
                 self.sft_ref_state[name] = param.data.clone()
+        
+        # 1. After SFT ref state save - verify the ref weights are actually different from base:
+        sft_norm = sum(p.norm().item() for p in self.sft_ref_state.values())
+        logger.info(f"SFT ref state total norm: {sft_norm:.4f}, num keys: {len(self.sft_ref_state)}")
+        
         # Compute dataset-level label counts for stable inverse class frequency weighting in R2
         surface_count = sum(1 for item in train_dataset if item.get("label") == 1)
         filter_count = sum(1 for item in train_dataset if item.get("label") == 0)
@@ -462,6 +467,19 @@ class DAPOTrainer:
                         accumulated_prompts.append(flat_prompts[flat_idx])
                         accumulated_completions.append(flat_completions[flat_idx])
                         accumulated_advantages.append(group_advs[idx].item())
+                        
+                # 3. After advantage computation, before the zero-variance check - see what the model is actually working with:
+                if step % 5 == 0:
+                    for g_idx in range(advantages.size(0)):
+                        g = advantages[g_idx]
+                        g_r2 = adv_r2[g_idx]
+                        logger.info(
+                            f"  DEBUG Group {g_idx}: adv std={g.std().item():.4f}, "
+                            f"min={g.min().item():.3f}, max={g.max().item():.3f}, "
+                            f"r2_adv std={g_r2.std().item():.4f}, "
+                            f"label={flat_labels[g_idx*oversample_size]}, "
+                            f"decisions={[parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]}"
+                        )
                 
                 n_valid = len(accumulated_advantages) // oversample_size
                 if n_valid >= target_valid_groups:
@@ -489,6 +507,15 @@ class DAPOTrainer:
             address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
             
             flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
+            
+            # 4. After global normalization, before the loss loop - see final advantage distribution:
+            logger.info(
+                f"  DEBUG Advantages: n={len(flat_advantages)}, "
+                f"mean={flat_advantages.mean().item():.4f}, std={flat_advantages.std().item():.4f}, "
+                f"min={flat_advantages.min().item():.3f}, max={flat_advantages.max().item():.3f}, "
+                f"n_positive={( flat_advantages > 0).sum().item()}, n_negative={(flat_advantages < 0).sum().item()}, "
+                f"n_zero_var_groups={n_zero_var}"
+            )
             
             # 5. Compute GRPO Loss & Update on the filtered sequences
             # Convert prompts + completions to tensors
@@ -530,6 +557,13 @@ class DAPOTrainer:
                             p.data.copy_(current_state[n])
                     
                 curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                
+                # 2. Inside the micro-batch loop, after computing ref and curr logprobs - verify KL is sane:
+                with torch.no_grad():
+                    kl_check = (curr_log_probs - ref_log_probs).mean().item()
+                    ratio_check = torch.exp(curr_log_probs - ref_log_probs).mean().item()
+                    if mb_idx == 0:
+                        logger.info(f"  DEBUG KL: mean(curr-ref)={kl_check:.4f}, mean_ratio={ratio_check:.4f}")
                 
                 # Calculate ratio and clip per token
                 mb_loss = 0.0
@@ -579,6 +613,17 @@ class DAPOTrainer:
                     token_loss = -torch.min(surr1, surr2).mean() + kl_penalty_weight * kl.mean() - entropy_bonus_weight * token_entropy.mean()
                     mb_loss += token_loss
                     mb_valid_tokens += 1
+                    
+                    # 5. Inside the per-token loss, log the actual loss components once per step:
+                    if mb_idx == 0 and idx == 0:
+                        logger.info(
+                            f"  DEBUG Loss components: surr={-torch.min(surr1, surr2).mean().item():.4f}, "
+                            f"kl={kl_penalty_weight * kl.mean().item():.4f}, "
+                            f"entropy={entropy_bonus_weight * token_entropy.mean().item():.4f}, "
+                            f"total={token_loss.item():.4f}, "
+                            f"mean_ratio={ratio.mean().item():.4f}, "
+                            f"clipped_frac={(( ratio > 1.0 + self.clip_ratio_high) | (ratio < 1.0 - self.clip_ratio_low)).float().mean().item():.2f}"
+                        )
                 
                 if mb_valid_tokens > 0:
                     mb_loss = mb_loss / mb_valid_tokens
