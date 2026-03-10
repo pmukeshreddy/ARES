@@ -166,10 +166,6 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
         test_embeddings = embedder.encode(raw_comments, convert_to_tensor=True)
         test_embeddings = F.normalize(test_embeddings, p=2, dim=1)
         
-        # Move db tensors to same device as test embeddings
-        db_embeddings = db_embeddings.to(test_embeddings.device)
-        db_labels = db_labels.to(test_embeddings.device)
-        
         # Compute cosine similarity matrix: (n_test, n_db)
         sim_matrix = torch.matmul(test_embeddings, db_embeddings.T)
     
