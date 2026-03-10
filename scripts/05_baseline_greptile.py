@@ -2,9 +2,9 @@
 Greptile-Style Baseline Evaluation (RAG / Vector Database approach).
 
 This establishes the industry-standard baseline:
-1. Generate a raw code review comment using a general instruction-tuned model (Qwen 14B).
+1. Generate a raw code review comment using a general instruction-tuned model.
 2. Embed the generated comment using `sentence-transformers`.
-3. Compare the embedding's cosine similarity against the Team's historical accepted (SURFACE) and ignored (FILTER) comments from their specific `train.jsonl` vector database.
+3. Compare the embedding's cosine similarity against the Team's historical accepted (SURFACE) and ignored (FILTER) comments from the Vector DB.
 4. If the comment is mathematically closer to the 'FILTER' cluster, drop it silently. Otherwise, SURFACE it.
 """
 
@@ -23,12 +23,11 @@ import torch
 import torch.nn.functional as F
 from sentence_transformers import SentenceTransformer
 import requests
+from transformers import AutoTokenizer
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(PROJECT_ROOT))
-
-from src.training.rewards import parse_completion
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -110,27 +109,35 @@ def generate_base_completion(prompts: list, tokenizer, max_tokens: int = 512):
             
     return completions
 
-def compute_team_embeddings(team_name: str, embedder, config_data):
-    """Builds the KNN Vector Database from team's raw historical comments (individual points, not centroid)."""
-    train_file = PROJECT_ROOT / "data" / "teams" / team_name / "train.jsonl"
-    if not train_file.exists():
-        logger.error(f"Training data (Vector DB) not found for team {team_name}")
-        return None, None
-        
-    comments = []
-    labels = []
-    
-    with open(train_file, "r") as f:
+def load_team_data(file_path: Path, target_team: str):
+    """Loads all datapoints matching a specific team from a monolithic file."""
+    data = []
+    with open(file_path, "r") as f:
         for line in f:
             item = json.loads(line)
-            comments.append(item["comment"])
-            labels.append(item["label"])
+            # Support both team_id and team keys depending on data version
+            team_val = item.get("team_id") or item.get("team")
+            if team_val == target_team:
+                data.append(item)
+    return data
+
+def compute_team_embeddings(team_name: str, train_file: Path, embedder):
+    """Builds the KNN Vector Database from team's raw historical comments (individual points)."""
+    if not train_file.exists():
+        logger.error(f"Training data not found at {train_file}")
+        return None, None
+        
+    team_data = load_team_data(train_file, team_name)
+    
+    comments = [item["comment"] for item in team_data]
+    labels = [item["label"] for item in team_data]
                 
     n_surface = sum(1 for l in labels if l == 1)
     n_filter = sum(1 for l in labels if l == 0)
     logger.info(f"Team '{team_name}' Vector Database: {n_surface} SURFACE, {n_filter} FILTER individual comment embeddings.")
     
     if not comments:
+        logger.warning(f"No training data found for team '{team_name}'. Skipping.")
         return None, None
         
     logger.info("Computing individual embeddings for KNN Vector DB...")
@@ -141,17 +148,16 @@ def compute_team_embeddings(team_name: str, embedder, config_data):
     labels_tensor = torch.tensor(labels, dtype=torch.long)
     return embeddings, labels_tensor
 
-def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedder, db_embeddings, db_labels, max_samples: int = 50, k: int = 3):
-    """Runs KNN k=3 evaluation directly on raw comments — no LLM generation.
-    Default: SURFACE (pass-through). Only filters if k nearest neighbors majority are FILTER.
-    """
+def evaluate_greptile_baseline(team_name: str, test_file: Path, tokenizer, embedder, db_embeddings, db_labels, max_samples: int = 50, k: int = 3):
+    """Runs KNN k=3 evaluation directly on LLM-generated comments."""
     logger.info(f"\n{'='*50}\nEvaluating Greptile Architecture for team: {team_name}\n{'='*50}")
     
-    dataset = []
-    with open(test_file, "r") as f:
-        for line in f:
-            dataset.append(json.loads(line))
+    dataset = load_team_data(test_file, team_name)
     dataset = dataset[:max_samples]
+    
+    if not dataset:
+         logger.warning(f"No testing data found for team '{team_name}'. Skipping.")
+         return None, None
     
     n_gt_surface = sum(1 for d in dataset if d["label"] == 1)
     n_gt_filter = sum(1 for d in dataset if d["label"] == 0)
@@ -159,12 +165,20 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
     
     results = []
     
-    # Embed raw test comments directly — no LLM involvement
-    raw_comments = [item["comment"] for item in dataset]
-    logger.info("Embedding raw test comments for KNN lookup...")
+    # 1. Generate new comments via LLM to emulate exactly how it works in Prod
+    diffs = [item.get("diff_hunk", item.get("diff", "")) for item in dataset]
+    logger.info("Generating base comments from diffs via SGLang...")
+    generated_comments = generate_base_completion(diffs, tokenizer)
+    
+    # 2. Embed the generated comments for querying the Vector DB
+    logger.info("Embedding generated test comments for KNN lookup...")
     with torch.no_grad():
-        test_embeddings = embedder.encode(raw_comments, convert_to_tensor=True)
+        test_embeddings = embedder.encode(generated_comments, convert_to_tensor=True)
         test_embeddings = F.normalize(test_embeddings, p=2, dim=1)
+        
+        # Move db tensors to same device as test embeddings
+        db_embeddings = db_embeddings.to(test_embeddings.device)
+        db_labels = db_labels.to(test_embeddings.device)
         
         # Compute cosine similarity matrix: (n_test, n_db)
         sim_matrix = torch.matmul(test_embeddings, db_embeddings.T)
@@ -187,18 +201,22 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
             decision = "SURFACE"  # Default: pass through
         
         top_sim = sims[topk_indices[0]].item()
+        
+        # Capture generated snippet for tracing
+        snippet = generated_comments[t_idx].split('\n')[0][:80] if generated_comments[t_idx] else "<FAILED_GENERATION>"
+        
         results.append({
             "team": team_name,
             "ground_truth_label": item["label"],
             "predicted_label": pred,
             "top_sim": top_sim,
             "knn_votes": f"{n_surface_neighbors}S/{n_filter_neighbors}F",
-            "comment_snippet": item["comment"][:80],
+            "comment_snippet": snippet,
         })
             
     # Metrics Calculation
     correct = sum(1 for r in results if r["ground_truth_label"] == r["predicted_label"])
-    accuracy = correct / len(results)
+    accuracy = correct / max(1, len(results))
     
     true_positives = sum(1 for r in results if r["ground_truth_label"] == 1 and r["predicted_label"] == 1)
     false_positives = sum(1 for r in results if r["ground_truth_label"] == 0 and r["predicted_label"] == 1)
@@ -230,7 +248,7 @@ def evaluate_greptile_baseline(team_name: str, test_file: str, tokenizer, embedd
 def main():
     parser = argparse.ArgumentParser(description="RLCR v2: Greptile KNN Baseline")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--teams", nargs="*", default=None)
+    parser.add_argument("--teams", nargs="*", default=None, help="Specific teams to evaluate (e.g., pragmatic-shippers)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--k", type=int, default=3, help="KNN k neighbors")
     args = parser.parse_args()
@@ -239,39 +257,68 @@ def main():
         config_data = yaml.safe_load(f)
         
     embedder_name = config_data["embeddings"]["model_name"]
+    model_name = config_data["dapo"]["model_name"] # Using student model 1.5B for fair comparison
     
-    teams_dir = PROJECT_ROOT / "data" / "teams"
-    all_teams = sorted([d.name for d in teams_dir.iterdir() if d.is_dir()])
+    # Find active teams from the processed file
+    processed_dir = PROJECT_ROOT / "data" / "processed"
+    train_file = processed_dir / "train.jsonl"
+    val_file = processed_dir / "val.jsonl"
+    
+    logger.info("Scanning dataset for active teams...")
+    all_teams = set()
+    with open(train_file, "r") as f:
+        for line in f:
+            item = json.loads(line)
+            team_val = item.get("team_id") or item.get("team")
+            if team_val:
+                 all_teams.add(team_val)
+                 
+    all_teams = sorted(list(all_teams))
     teams = [t for t in args.teams if t in all_teams] if args.teams else all_teams
+    
+    if not teams:
+        logger.error(f"No matching teams found. Available teams: {all_teams}")
+        sys.exit(1)
+        
+    logger.info(f"Will evaluate teams: {teams}")
+    
+    # Ignite SGLang Base server to represent production RAG system
+    server_process = start_sglang_server(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     # Initialize Embedder (the "Greptile Vector Database" engine)
     logger.info(f"Loading SentenceTransformer for KNN Vector Search: {embedder_name}")
     embedder = SentenceTransformer(embedder_name, device=args.device)
     
     all_metrics = []
-    for team_name in teams:
-        test_file = str(teams_dir / team_name / "test.jsonl")
-        
-        # Pre-compute individual embeddings for KNN Vector DB
-        db_embeddings, db_labels = compute_team_embeddings(team_name, embedder, config_data)
-        
-        if db_embeddings is None:
-            continue
+    
+    try:
+        for team_name in teams:
+            # Pre-compute individual embeddings for KNN Vector DB
+            db_embeddings, db_labels = compute_team_embeddings(team_name, train_file, embedder)
             
-        metrics, _ = evaluate_greptile_baseline(
-            team_name, test_file, tokenizer=None, embedder=embedder,
-            db_embeddings=db_embeddings, db_labels=db_labels, k=args.k
-        )
-        
-        if metrics:
-            all_metrics.append(metrics)
+            if db_embeddings is None:
+                continue
+                
+            metrics, _ = evaluate_greptile_baseline(
+                team_name, val_file, tokenizer, embedder,
+                db_embeddings=db_embeddings, db_labels=db_labels, k=args.k
+            )
+            
+            if metrics:
+                all_metrics.append(metrics)
+                
+    finally:
+         logger.info("Cleaning up SGLang server...")
+         server_process.terminate()
+         subprocess.run(f"fuser -k {SGLANG_PORT}/tcp", shell=True, capture_output=True)
             
     # Print Summary Panel identically to DAPO eval
     print("\n" + "=" * 60)
     print("EVALUATION SUMMARY (Greptile KNN k=3 Baseline)")
     print("=" * 70)
     for m in all_metrics:
-        print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.2f} | Address Rate: {m['address_rate']:.2f}")
+        print(f"Team: {m['team']:<20} | Acc: {m['accuracy']:.4f} | Address Rate: {m['address_rate']:.2f}")
     print("=" * 70)
 
 if __name__ == "__main__":
