@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 import yaml
 from tqdm import tqdm
-from datasets import load_dataset, Features, Value
+from datasets import load_dataset
 from torch.utils.data import DataLoader
 
 import os
@@ -76,21 +76,15 @@ def main():
     logger.info(f"Setting up Multi-Worker Streaming Dataset...")
     
     # 1. Load the huge 10GB file using underlying Rust/C++ iterators via streaming
-    # Force a strict feature schema to prevent KeyErrors on mixed unstructured JSON schemas
-    features = Features({
-        "example_id": Value("string"),
-        "diff_hunk": Value("string"),
-        "comment": Value("string")
-    })
-    
-    dataset = load_dataset("json", data_files=base_data, features=features, streaming=True)["train"]
+    dataset = load_dataset("json", data_files=base_data, split="train", streaming=True)
     dataset = dataset.take(args.max_samples)
     
     # 2. Setup the CPU tokenization mapping function
     def tokenize_and_format(examples):
-        diffs = examples.get("diff_hunk", [""]) if isinstance(examples.get("diff_hunk"), list) else [examples.get("diff_hunk", "")]
-        comments = examples.get("comment", [""]) if isinstance(examples.get("comment"), list) else [examples.get("comment", "")]
-        example_ids = examples.get("example_id", []) if isinstance(examples.get("example_id"), list) else [examples.get("example_id", None)]
+        # Safely extract what we need, ignoring all other unstructured keys (like comment_type)
+        diffs = examples.get("diff_hunk", []) 
+        comments = examples.get("comment", [])
+        example_ids = examples.get("example_id", [])
         
         final_ids = []
         for i in range(len(diffs)):
