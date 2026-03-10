@@ -193,7 +193,7 @@ def evaluate_greptile_baseline(team_name: str, test_file: Path, tokenizer, embed
         n_surface_neighbors = (topk_labels == 1).sum().item()
         
         # Only suppress if majority of k neighbors are FILTER (Greptile pass-through default = SURFACE)
-        if n_filter_neighbors > n_surface_neighbors:
+        if n_filter_neighbors >= n_surface_neighbors:
             pred = 0
             decision = "FILTER"
         else:
