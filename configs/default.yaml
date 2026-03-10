@@ -96,7 +96,7 @@ dapo:
   # Training
   batch_size: 2          # Reduced from 4 for 14B VRAM limits
   learning_rate: 2.0e-6
-  max_steps: 150
+  max_steps: 50
   
   # GRPO
   group_size: 4          # Reduced from 8 for 14B VRAM limits (Generates 4 rollouts instead of 8)
