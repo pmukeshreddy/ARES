@@ -37,7 +37,7 @@ def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subpro
     lora_targets = dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
     
     # Use isolated venv so SGLang's PyTorch doesn't conflict with training env
-    sglang_python = "/opt/sglang_venv/bin/python3"
+    sglang_python = sys.executable
     
     cmd = [
         sglang_python, "-m", "sglang.launch_server",

@@ -68,7 +68,7 @@ def start_sglang_server(model_name: str, dapo_config: dict):
     lora_rank = str(dapo_config.get("lora_r", 16))
     lora_targets = dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
     
-    sglang_python = "/opt/sglang_venv/bin/python3"
+    sglang_python = sys.executable
     
     cmd = [
         sglang_python, "-m", "sglang.launch_server",
