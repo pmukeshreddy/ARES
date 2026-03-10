@@ -106,7 +106,7 @@ dapo:
   token_level_loss: true
   kl_penalty: 0.05
   entropy_bonus: 0.03    # Token-level entropy bonus to prevent policy collapse
-  max_new_tokens: 512
+  max_new_tokens: 256
   
   # Reward Weights
   r1_weight: 0.10      # Reasoning quality

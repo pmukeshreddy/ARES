@@ -171,17 +171,24 @@ class DAPORewardScales:
         """
         return format_scores
         
-    def compute_r5_overlong_penalty(self, completions: list) -> list:
+    def compute_r5_overlong_penalty(self, completions: list, decisions: list) -> list:
         """
         R5: Overlong Penalty (weight 0.20)
         Token-based progressive negative penalty for bloated completions.
+        Decision-aware thresholds: FILTER should be brief, SURFACE can be longer.
         """
         max_new_tokens = self.config.get("max_new_tokens", 256)
-        threshold = int(0.75 * max_new_tokens)
         
         rewards = []
-        for text in completions:
+        for text, dec in zip(completions, decisions):
             token_count = len(self.tokenizer.encode(text, add_special_tokens=False))
+            
+            # Decision-aware thresholds
+            if dec == "FILTER":
+                threshold = int(0.4 * max_new_tokens)  # ~100 tokens
+            else:
+                threshold = int(0.8 * max_new_tokens)  # ~200 tokens
+                
             if token_count <= threshold:
                 rewards.append(0.0)
             elif token_count >= max_new_tokens:
@@ -229,7 +236,7 @@ class DAPORewardScales:
         r4 = self.compute_r4_format(format_scores)
         
         # R5 (DAPO Overlong Penalty)
-        r5 = self.compute_r5_overlong_penalty(completions)
+        r5 = self.compute_r5_overlong_penalty(completions, decisions)
         
         # Get weights
         if config is not None:
