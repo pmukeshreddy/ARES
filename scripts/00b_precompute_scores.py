@@ -8,7 +8,7 @@ from pathlib import Path
 import torch
 import yaml
 from tqdm import tqdm
-from datasets import load_dataset
+from datasets import load_dataset, Features, Value
 from torch.utils.data import DataLoader
 
 import os
@@ -76,7 +76,14 @@ def main():
     logger.info(f"Setting up Multi-Worker Streaming Dataset...")
     
     # 1. Load the huge 10GB file using underlying Rust/C++ iterators via streaming
-    dataset = load_dataset("json", data_files=base_data, streaming=True)["train"]
+    # Force a strict feature schema to prevent KeyErrors on mixed unstructured JSON schemas
+    features = Features({
+        "example_id": Value("string"),
+        "diff_hunk": Value("string"),
+        "comment": Value("string")
+    })
+    
+    dataset = load_dataset("json", data_files=base_data, features=features, streaming=True)["train"]
     dataset = dataset.take(args.max_samples)
     
     # 2. Setup the CPU tokenization mapping function
