@@ -196,28 +196,20 @@ class DAPOTrainer:
         sft_warmup_path = Path("checkpoints/sft_warmup") / f"sft_warmup_{team_name}"
         if sft_warmup_path.exists():
             logger.info(f"Loading SFT warm-up weights from {sft_warmup_path}")
+            self.model.load_adapter(str(sft_warmup_path), "sft_ref")
+            logger.info(f"Loaded 'sft_ref' adapter. DAPO will train 'default' adapter.")
+            
+            # Copy sft_ref weights into default so the default policy starts at the SFT optimal point.
             import safetensors.torch
             sft_state = safetensors.torch.load_file(str(sft_warmup_path / "adapter_model.safetensors"))
-            
-            # Load into training model
-            # PEFT uses ".default." in key names for named adapters, but save_pretrained
-            # saves without it. Remap: lora_A.weight -> lora_A.default.weight
             model_state = self.model.state_dict()
             matched = 0
             for sft_key, sft_val in sft_state.items():
-                # Try direct match first
-                if sft_key in model_state:
-                    model_state[sft_key].copy_(sft_val)
+                remapped = sft_key.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
+                if remapped in model_state:
+                    model_state[remapped].copy_(sft_val)
                     matched += 1
-                else:
-                    # Remap: insert ".default" before ".weight" in lora key
-                    remapped = sft_key.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
-                    if remapped in model_state:
-                        model_state[remapped].copy_(sft_val)
-                        matched += 1
-            logger.info(f"SFT warm-up: matched {matched}/{len(sft_state)} keys into training model for {team_name}")
-            
-            logger.info(f"SFT warm-up: matched {matched}/{len(sft_state)} keys into training model for {team_name}")
+            logger.info(f"SFT warm-up copied to active 'default' adapter. Matched {matched} keys.")
             
         else:
             logger.info(f"No SFT warm-up found at {sft_warmup_path}, using random LoRA init")
@@ -225,9 +217,7 @@ class DAPOTrainer:
                 if "lora" in name:
                     torch.nn.init.normal_(param, std=0.01)
                     
-        # We don't need to manually save sft_ref_state. The self.model starts with the SFT weights.
-        # When we apply LoRA, the "base model" underneath PEFT IS the SFT-warmup model.
-        # So `with self.model.disable_adapter():` will evaluate using the exact SFT weights!
+        self.model.set_adapter("default")
         
         # Compute dataset-level label counts for stable inverse class frequency weighting in R2
         surface_count = sum(1 for item in train_dataset if item.get("label") == 1)
@@ -238,6 +228,12 @@ class DAPOTrainer:
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config["learning_rate"])
         
         max_steps = self.config.get("max_steps", 300)
+        from transformers import get_cosine_schedule_with_warmup
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer, 
+            num_warmup_steps=int(max_steps * 0.1), 
+            num_training_steps=max_steps
+        )
         batch_size = self.config.get("batch_size", 4)
         
         lora_sync_dir = f"/tmp/lora_dapo_{team_name}"
@@ -500,9 +496,10 @@ class DAPOTrainer:
             
             address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
             
-            flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
+            # Removed global normalization: flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
+            # GDPO already normalizes per-group and applies weights. Global normalization destroys the weighting.
             
-            # 4. After global normalization, before the loss loop - see final advantage distribution:
+            # 4. After group normalization, before the loss loop - see final advantage distribution:
             logger.info(
                 f"  DEBUG Advantages: n={len(flat_advantages)}, "
                 f"mean={flat_advantages.mean().item():.4f}, std={flat_advantages.std().item():.4f}, "
@@ -534,10 +531,15 @@ class DAPOTrainer:
                 # The sum of mask gives the exact index where generation starts (since it's 0-indexed)
                 prompt_lens = prompt_inputs.attention_mask.sum(dim=1)
                 
-                # Calculate logprobs using SFT reference (disable_adapter bypasses active LoRA)
+                # Calculate logprobs using SFT reference adapter
                 with torch.no_grad():
-                    with self.model.disable_adapter():
+                    if "sft_ref" in self.model.peft_config:
+                        self.model.set_adapter("sft_ref")
                         ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                        self.model.set_adapter("default")
+                    else:
+                        with self.model.disable_adapter():
+                            ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                     
                 # Calculate logprobs using active policy (current LoRA weights)
                 curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
@@ -592,10 +594,11 @@ class DAPOTrainer:
                     gen_log_probs = F.log_softmax(gen_logits, dim=-1)
                     token_entropy = -(gen_probs * gen_log_probs).sum(dim=-1)  # H per position
                     
-                    # HIGH-ENTROPY TOKEN MASK: only train on top 20% tokens
-                    rho = 0.2
+                    # HIGH-ENTROPY TOKEN MASK: Keep top 80% of tokens to preserve <decision> tags
+                    # while dropping the 20% most certain (lowest entropy) boilerplate tokens.
+                    rho_keep = 0.8
                     n_tokens = token_entropy.size(0)
-                    k = max(1, int(n_tokens * rho))
+                    k = max(1, int(n_tokens * rho_keep))
                     entropy_threshold = torch.topk(token_entropy, k).values[-1]
                     entropy_mask = (token_entropy >= entropy_threshold).float()
                     
@@ -644,7 +647,9 @@ class DAPOTrainer:
             grads_norm = grads_norm ** 0.5
             logger.info(f"  DEBUG Pre-Step: grad_norm={grads_norm:.4f}, active_lora_tensors={n_active}, frozen_lora_tensors={n_frozen}")
 
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             loss_total = torch.tensor(loss_total_logging / num_microbatches)
             
             global_step += 1
