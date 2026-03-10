@@ -109,11 +109,11 @@ dapo:
   max_new_tokens: 512
   
   # Reward Weights
-  r1_weight: 0.15      # Reasoning quality
-  r2_weight: 0.50      # Outcome match (team labels) — dominant signal
+  r1_weight: 0.10      # Reasoning quality
+  r2_weight: 0.65      # Outcome match (team labels) — dominant signal
   r3_weight: 0.05      # RM Agreement (noisy, downweighted)
-  r4_weight: 0.15      # Format compliance
-  r5_weight: 0.15      # Overlong penalty
+  r4_weight: 0.10      # Format compliance
+  r5_weight: 0.10      # Overlong penalty
   
   # R2 configuration
   r2_false_positive_penalty: -1.0
