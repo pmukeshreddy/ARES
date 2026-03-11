@@ -122,6 +122,6 @@ dapo:
   r5_weight: 0.20      # Overlong penalty (was 0.10)
   
   # R2 configuration
-  r2_true_positive_reward: 2.0    # +2.0 for correct SURFACE — matches FP penalty magnitude
+  r2_true_positive_reward: 1.5    # +1.5 for correct SURFACE — requires ~55% confidence
   r2_false_positive_penalty: -2.0   # 2x penalty for wrong SURFACE — drives higher address rate
   r2_false_negative_penalty: -1.0
