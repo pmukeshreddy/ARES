@@ -228,11 +228,10 @@ class DAPOTrainer:
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config["learning_rate"])
         
         max_steps = self.config.get("max_steps", 300)
-        from transformers import get_cosine_schedule_with_warmup
-        scheduler = get_cosine_schedule_with_warmup(
+        from transformers import get_constant_schedule_with_warmup
+        scheduler = get_constant_schedule_with_warmup(
             optimizer, 
-            num_warmup_steps=int(max_steps * 0.1), 
-            num_training_steps=max_steps
+            num_warmup_steps=int(max_steps * 0.1)
         )
         batch_size = self.config.get("batch_size", 4)
         
@@ -683,11 +682,42 @@ class DAPOTrainer:
                                         f"{'KEPT' if entropy_mask[di].item() > 0 else 'MASKED-OUT'}"
                                     )
                     
-                    # Apply mask to surrogate loss
-                    surr_min = torch.min(surr1, surr2)
-                    weighted_surr = -(surr_min * entropy_mask).sum() / max(1.0, entropy_mask.sum())
+                    # ── Decision Token Boosting ─────────────────────────
+                    # Give decision-region tokens higher gradient weight so R2's
+                    # signal goes directly to SURFACE/FILTER instead of being
+                    # diluted across ~100 reasoning tokens (~1-2% of sequence).
+                    decision_boost = self.config.get("decision_token_boost", 5.0)
+                    token_weight = torch.ones_like(token_entropy)  # default weight 1.0
                     
-                    # KL and entropy bonus only on masked tokens too
+                    # Decode generated tokens to find <decision>...</decision> region
+                    gen_token_ids = inputs.input_ids[idx, start_idx+1:end_idx+1]
+                    gen_tokens_list = self.tokenizer.convert_ids_to_tokens(gen_token_ids.tolist())
+                    gen_text = self.tokenizer.decode(gen_token_ids.tolist())
+                    dec_start_char = gen_text.find('<decision>')
+                    dec_end_char = gen_text.find('</decision>')
+                    
+                    if dec_start_char >= 0 and dec_end_char >= 0:
+                        dec_end_char += len('</decision>')
+                        chars_so_far = 0
+                        for t_i, tok in enumerate(gen_tokens_list):
+                            if t_i >= len(token_weight):
+                                break
+                            tok_text = self.tokenizer.convert_tokens_to_string([tok])
+                            tok_start = chars_so_far
+                            tok_end = chars_so_far + len(tok_text)
+                            if tok_end > dec_start_char and tok_start < dec_end_char:
+                                token_weight[t_i] = decision_boost
+                            chars_so_far = tok_end
+                    
+                    if step % 5 == 0 and mb_idx == 0 and idx == 0:
+                        n_boosted = (token_weight > 1.0).sum().item()
+                        logger.info(f"  DIAG-6 Decision boost: {n_boosted} tokens boosted {decision_boost}x out of {len(token_weight)} total")
+                    
+                    # Apply mask and token weight to surrogate loss
+                    surr_min = torch.min(surr1, surr2)
+                    weighted_surr = -(surr_min * entropy_mask * token_weight).sum() / max(1.0, (entropy_mask * token_weight).sum())
+                    
+                    # KL and entropy bonus only on masked tokens (no boost needed)
                     masked_kl = (kl * entropy_mask).sum() / max(1.0, entropy_mask.sum())
                     masked_entropy = (token_entropy * entropy_mask).sum() / max(1.0, entropy_mask.sum())
                     
