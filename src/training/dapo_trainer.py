@@ -311,12 +311,6 @@ class DAPOTrainer:
                     sync_path = f"{lora_sync_dir}_step{step}"
                     os.makedirs(sync_path, exist_ok=True)
                     self.model.save_pretrained(sync_path)
-                    # Unload old LoRA from SGLang to avoid memory leak
-                    if current_lora_name is not None:
-                        try:
-                            self.sglang.unload_lora(current_lora_name)
-                        except Exception:
-                            pass  # Non-fatal
                     self.sglang.load_lora(new_lora_name, sync_path)
                 current_lora_name = new_lora_name
                 
