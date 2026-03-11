@@ -844,7 +844,16 @@ class DAPOTrainer:
                     best_eval_accuracy = mv_addr
                     best_cp = Path(self.config["output_dir"]) / f"dapo_lora_{team_name}_best"
                     best_cp.parent.mkdir(parents=True, exist_ok=True)
-                    self.model.save_pretrained(str(best_cp))
+                    # Copy the SGLang LoRA sync dir — these are the EXACT weights that produced the eval
+                    import shutil as _shutil
+                    sglang_lora_dir = f"{lora_sync_dir}_step{global_step - 1}"
+                    if Path(sglang_lora_dir).exists():
+                        if best_cp.exists():
+                            _shutil.rmtree(best_cp)
+                        _shutil.copytree(sglang_lora_dir, best_cp)
+                    else:
+                        # Fallback: save current model weights
+                        self.model.save_pretrained(str(best_cp))
                     best_checkpoint_path = best_cp
                     logger.info(f"  NEW BEST checkpoint saved (addr_rate={mv_addr:.0f}%) → {best_cp}")
         

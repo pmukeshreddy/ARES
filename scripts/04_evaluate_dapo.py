@@ -121,7 +121,7 @@ def load_lora(adapter_name: str, lora_path: str):
     return True
 
 
-def generate_completions(prompts: list, lora_name: str, tokenizer, n: int = 8, max_tokens: int = 512):
+def generate_completions(prompts: list, lora_name: str, tokenizer, n: int = 8, max_tokens: int = 256):
     """Generate N completions per prompt using SGLang — identical to training."""
     url = f"{SGLANG_URL}/generate"
     all_results = []
@@ -180,7 +180,7 @@ def generate_completions(prompts: list, lora_name: str, tokenizer, n: int = 8, m
 
 
 def evaluate_team(team_name: str, test_file: str, lora_path: str,
-                  tokenizer, num_votes: int = 8, max_samples: int = 50):
+                  tokenizer, num_votes: int = 8, max_samples: int = 50, max_tokens: int = 256):
     """Evaluate a team using SGLang with proper majority voting per prompt.
     
     Invalid completions (failed to parse) are excluded from the vote count
@@ -229,7 +229,7 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
         
         completions_grouped = generate_completions(
             prompts, lora_name=adapter_name, tokenizer=tokenizer,
-            n=num_votes
+            n=num_votes, max_tokens=max_tokens
         )
         
         for b_idx, item in enumerate(batch):
@@ -389,9 +389,11 @@ def main():
             lora_path = str(Path(lora_path).resolve())
             logger.info(f"Using {label} LoRA: {lora_path} on {data_label} data")
             
+            max_tokens = dapo_config.get("max_new_tokens", 256)
             metrics, results = evaluate_team(
                 team_name, test_file, lora_path, tokenizer,
-                num_votes=args.num_votes, max_samples=args.max_samples
+                num_votes=args.num_votes, max_samples=args.max_samples,
+                max_tokens=max_tokens
             )
             
             if metrics:
