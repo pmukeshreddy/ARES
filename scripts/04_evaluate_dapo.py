@@ -201,6 +201,11 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
     if not dataset:
         return None, None
     
+    # Regenerate prompts from current template (same as 03_train_dapo.py)
+    from src.data.team_dataset import generate_prompt
+    for item in dataset:
+        item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
+    
     # Count ground truth
     n_gt_surface = sum(1 for d in dataset if d["label"] == 1)
     n_gt_filter = sum(1 for d in dataset if d["label"] == 0)
