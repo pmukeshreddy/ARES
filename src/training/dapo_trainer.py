@@ -771,51 +771,61 @@ class DAPOTrainer:
                     temperature=self.config.get("temperature", 0.8)
                 )
                 
-                # Per-completion accuracy
+                # Per-completion metrics (matches training reporting)
                 eval_correct = 0
                 eval_total = 0
                 eval_tp = 0
                 eval_fp = 0
                 eval_fn = 0
+                eval_tn = 0
                 per_prompt_results = []
                 
+                gt_surface = sum(1 for l in eval_labels if l == 1)
+                gt_filter = sum(1 for l in eval_labels if l == 0)
+                logger.info(f"  GT distribution: {gt_surface} SURFACE / {gt_filter} FILTER")
+                
                 for i in range(eval_size):
-                    votes = []
+                    prompt_votes = []
                     for comp in eval_completions[i]:
                         parsed = parse_completion(comp)
                         dec = parsed["decision"]
+                        gt_label = eval_labels[i]
+                        gt = "SURFACE" if gt_label == 1 else "FILTER"
+                        
+                        if dec == "SURFACE":
+                            eval_total += 1
+                            if gt_label == 1:
+                                eval_tp += 1
+                                eval_correct += 1
+                            else:
+                                eval_fp += 1
+                        elif dec == "FILTER":
+                            eval_total += 1
+                            if gt_label == 0:
+                                eval_tn += 1
+                                eval_correct += 1
+                            else:
+                                eval_fn += 1
+                        
                         if dec in ("SURFACE", "FILTER"):
-                            votes.append(dec)
+                            prompt_votes.append(dec)
                     
-                    if votes:
-                        # Majority vote
-                        n_surf = sum(1 for v in votes if v == "SURFACE")
-                        majority = "SURFACE" if n_surf > len(votes) / 2 else "FILTER"
+                    # Show per-prompt majority for readability
+                    gt = "SURFACE" if eval_labels[i] == 1 else "FILTER"
+                    if prompt_votes:
+                        n_surf = sum(1 for v in prompt_votes if v == "SURFACE")
+                        majority = "SURFACE" if n_surf > len(prompt_votes) / 2 else "FILTER"
                     else:
                         majority = "INVALID"
-                    
-                    gt = "SURFACE" if eval_labels[i] == 1 else "FILTER"
-                    match = majority == gt
-                    if match:
-                        eval_correct += 1
-                    eval_total += 1
-                    
-                    if majority == "SURFACE" and gt == "SURFACE":
-                        eval_tp += 1
-                    elif majority == "SURFACE" and gt == "FILTER":
-                        eval_fp += 1
-                    elif majority == "FILTER" and gt == "SURFACE":
-                        eval_fn += 1
-                    
-                    mark = "✓" if match else "✗"
-                    per_prompt_results.append(f"[{mark}] GT={gt:7s} Pred={majority}")
+                    mark = "✓" if majority == gt else "✗"
+                    per_prompt_results.append(f"[{mark}] GT={gt:7s} Majority={majority} ({n_surf if prompt_votes else 0}/{len(prompt_votes)}S)")
                 
                 eval_acc = eval_correct / max(1, eval_total)
                 eval_addr = eval_tp / max(1, eval_tp + eval_fp) * 100
                 
-                logger.info(f"  Accuracy: {eval_correct}/{eval_total} ({eval_acc*100:.0f}%)")
-                logger.info(f"  Address Rate: {eval_addr:.0f}%")
-                logger.info(f"  TP={eval_tp} FP={eval_fp} FN={eval_fn}")
+                logger.info(f"  Per-completion accuracy: {eval_correct}/{eval_total} ({eval_acc*100:.0f}%)")
+                logger.info(f"  Per-completion Address Rate: {eval_addr:.0f}%")
+                logger.info(f"  TP={eval_tp} FP={eval_fp} FN={eval_fn} TN={eval_tn}")
                 for r in per_prompt_results[:10]:
                     logger.info(f"    {r}")
                 if len(per_prompt_results) > 10:
