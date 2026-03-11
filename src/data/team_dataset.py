@@ -155,7 +155,7 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
             break
             
         data = json.loads(line)
-        comment = data.get("comment", "").lower()
+        comment = data.get("comment", "")
         diff = data.get("diff_hunk", "")
         # Real world label (did it get acted on?)
         original_label = data.get("label", 0)
