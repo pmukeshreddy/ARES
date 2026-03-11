@@ -181,7 +181,11 @@ def generate_completions(prompts: list, lora_name: str, tokenizer, n: int = 8, m
 
 def evaluate_team(team_name: str, test_file: str, lora_path: str,
                   tokenizer, num_votes: int = 8, max_samples: int = 50):
-    """Evaluate a team using SGLang with majority voting."""
+    """Evaluate a team using SGLang with proper majority voting per prompt.
+    
+    Invalid completions (failed to parse) are excluded from the vote count
+    instead of being silently counted as FILTER.
+    """
     logger.info(f"\n{'='*50}\nEvaluating team: {team_name}\n{'='*50}")
     
     if not os.path.exists(test_file):
@@ -210,7 +214,9 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
     
     # Generate completions in batches
     batch_size = 8
-    results = []
+    # Store per-prompt completion groups for majority voting
+    prompt_results = []  # list of {gt_label, completions: [{decision, raw}]}
+    all_completions = []  # flat list for individual stats
     
     for i in tqdm(range(0, len(dataset), batch_size), desc=f"Evaluating {team_name}"):
         batch = dataset[i:i+batch_size]
@@ -222,61 +228,108 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
         )
         
         for b_idx, item in enumerate(batch):
+            prompt_comps = []
             for comp in completions_grouped[b_idx]:
                 parsed = parse_completion(comp)
-                pred = 1 if parsed["decision"] == "SURFACE" else 0
-                
-                results.append({
-                    "team": team_name,
-                    "ground_truth_label": item["label"],
-                    "predicted_label": pred,
-                    "raw_completion": comp,
+                decision = parsed["decision"]  # "SURFACE", "FILTER", or None
+                prompt_comps.append({"decision": decision, "raw": comp})
+                all_completions.append({
+                    "gt": item["label"],
+                    "decision": decision,
+                    "raw": comp
                 })
+            prompt_results.append({
+                "gt_label": item["label"],
+                "completions": prompt_comps
+            })
     
-    # Individual completion stats (matches training S:F reporting)
-    total_surface_votes = sum(1 for r in results if r["predicted_label"] == 1)
-    total_filter_votes = sum(1 for r in results if r["predicted_label"] == 0)
-    total_votes = total_surface_votes + total_filter_votes
-    completion_surface_pct = total_surface_votes / max(1, total_votes) * 100
-    print(f"\n  Individual completion stats: {total_surface_votes}S/{total_filter_votes}F ({completion_surface_pct:.0f}% SURFACE across all {total_votes} completions)")
+    # === Individual completion stats (excludes invalid) ===
+    valid_comps = [c for c in all_completions if c["decision"] is not None]
+    invalid_comps = [c for c in all_completions if c["decision"] is None]
+    n_surface_votes = sum(1 for c in valid_comps if c["decision"] == "SURFACE")
+    n_filter_votes = sum(1 for c in valid_comps if c["decision"] == "FILTER")
+    n_invalid = len(invalid_comps)
+    total_comps = len(all_completions)
     
-    # Check if generation actually worked
-    if total_votes == 0:
-        logger.error("ALL completions were empty! SGLang generation is broken.")
-        logger.error("Check sglang_eval.log for errors.")
+    print(f"\n  Individual completion stats: {n_surface_votes}S/{n_filter_votes}F/{n_invalid}inv "
+          f"({n_surface_votes / max(1, n_surface_votes + n_filter_votes) * 100:.0f}% SURFACE "
+          f"across {n_surface_votes + n_filter_votes} valid of {total_comps} total)")
+    
+    if n_surface_votes + n_filter_votes == 0:
+        logger.error("ALL completions were invalid! SGLang generation is broken.")
         return None, None
     
-    # Metrics
-    correct = sum(1 for r in results if r["ground_truth_label"] == r["predicted_label"])
-    accuracy = correct / len(results)
+    # === Majority Voting per prompt ===
+    correct = 0
+    true_positives = 0
+    false_positives = 0
+    false_negatives = 0
+    true_negatives = 0
+    n_tie = 0
     
-    true_positives = sum(1 for r in results if r["ground_truth_label"] == 1 and r["predicted_label"] == 1)
-    false_positives = sum(1 for r in results if r["ground_truth_label"] == 0 and r["predicted_label"] == 1)
-    false_negatives = sum(1 for r in results if r["ground_truth_label"] == 1 and r["predicted_label"] == 0)
+    print(f"\n  Per-prompt majority vote ({team_name}, {num_votes} completions per prompt):")
+    for pr in prompt_results:
+        gt = pr["gt_label"]
+        votes = [c["decision"] for c in pr["completions"] if c["decision"] is not None]
+        n_s = sum(1 for v in votes if v == "SURFACE")
+        n_f = sum(1 for v in votes if v == "FILTER")
+        n_valid = n_s + n_f
+        
+        if n_valid == 0:
+            # All completions invalid — skip this prompt
+            n_tie += 1
+            continue
+        
+        # Majority vote (ties go to FILTER since it's the conservative choice)
+        majority = 1 if n_s > n_f else 0
+        
+        gt_str = "SURFACE" if gt == 1 else "FILTER"
+        pred_str = "SURFACE" if majority == 1 else "FILTER"
+        match = "✓" if gt == majority else "✗"
+        
+        if gt == majority:
+            correct += 1
+        
+        if gt == 1 and majority == 1:
+            true_positives += 1
+        elif gt == 0 and majority == 1:
+            false_positives += 1
+        elif gt == 1 and majority == 0:
+            false_negatives += 1
+        else:
+            true_negatives += 1
+        
+        print(f"    [{match}] GT={gt_str:7s} Majority={pred_str:7s} ({n_s}/{n_valid}S)")
     
-    # Address Rate = (Comments devs acted on) / (Total comments Greptile posted) × 100
-    # Comments devs acted on = true_positives (GT=1, Pred=1)
-    # Total comments Greptile posted = true_positives + false_positives (Predictions=1)
+    n_voted = correct + (true_positives + false_positives + false_negatives + true_negatives - correct)
+    n_voted = len([pr for pr in prompt_results 
+                   if any(c["decision"] is not None for c in pr["completions"])])
+    
+    accuracy = correct / max(1, n_voted)
+    
+    # Address Rate = TP / (TP + FP) — only among prompts the model chose to SURFACE
     address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
     
-    # Per-sample diagnostics (showing individual completions now)
-    print(f"\n  Per-completion results ({team_name}, {num_votes} completions per prompt):")
-    for r in results[:20]:
-        gt = "SURFACE" if r["ground_truth_label"] == 1 else "FILTER"
-        pred = "SURFACE" if r["predicted_label"] == 1 else "FILTER"
-        match = "✓" if gt == pred else "✗"
-        snippet = r["raw_completion"][:100].replace('\n', ' ')
-        print(f"    [{match}] GT={gt:7s} Pred={pred:7s} | {snippet}...")
+    print(f"\n  Majority Vote Accuracy: {correct}/{n_voted} ({accuracy*100:.0f}%)")
+    print(f"  Address Rate: {address_rate:.1f}% (TP={true_positives}, FP={false_positives})")
+    if n_tie > 0:
+        print(f"  Skipped prompts (all invalid): {n_tie}")
     
     metrics = {
         "team": team_name,
         "accuracy": accuracy,
         "address_rate": address_rate,
         "total_samples": len(dataset),
-        "total_completions": len(results)
+        "total_completions": total_comps,
+        "valid_completions": n_surface_votes + n_filter_votes,
+        "invalid_completions": n_invalid,
+        "true_positives": true_positives,
+        "false_positives": false_positives,
+        "false_negatives": false_negatives,
+        "true_negatives": true_negatives,
     }
     
-    return metrics, results
+    return metrics, prompt_results
 
 
 def main():
