@@ -95,7 +95,7 @@ dapo:
   
   # Training
   batch_size: 4          # Increased to 4
-  learning_rate: 5.0e-6
+  learning_rate: 2.0e-5
   max_steps: 50
   lora_sync_interval: 1  # Sync to SGLang every step
   
@@ -106,12 +106,12 @@ dapo:
   dynamic_sampling: true
   token_level_loss: true
   kl_penalty: 0.05
-  entropy_bonus: 0.03    # Token-level entropy bonus to prevent policy collapse
+  entropy_bonus: 0.01    # Token-level entropy bonus to prevent policy collapse
   max_new_tokens: 256
   
   # Reward Weights
-  r1_weight: 0.40      # Reasoning quality
-  r2_weight: 0.50      # Outcome match (team labels)
+  r1_weight: 0.10      # Reasoning quality
+  r2_weight: 0.65      # Outcome match (team labels)
   r3_weight: 0.05      # RM Agreement (noisy, downweighted)
   r4_weight: 0.10      # Format compliance
   r5_weight: 0.10      # Overlong penalty

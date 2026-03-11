@@ -496,8 +496,12 @@ class DAPOTrainer:
             
             address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
             
-            # Removed global normalization: flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std() + 1e-8)
-            # GDPO already normalizes per-group and applies weights. Global normalization destroys the weighting.
+            # Soft normalization: scale to unit std without subtracting mean.
+            # This preserves GDPO per-component weighting while keeping advantage
+            # magnitudes large enough to produce meaningful gradients.
+            adv_std = flat_advantages.std() + 1e-8
+            if adv_std < 0.5:
+                flat_advantages = flat_advantages / adv_std
             
             # 4. After group normalization, before the loss loop - see final advantage distribution:
             logger.info(
