@@ -109,19 +109,35 @@ class DAPORewardScales:
 
     def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list, has_label: list, example_ids: list, team_names: list) -> list:
         """
-        R2: Outcome Match (Continuous Margin Reward)
-        Reward is the distance between the comment's Phase 1 RM Score and the Team's Threshold.
-        Egregious errors (surfacing a 0.1 to a 0.85 team) get massive penalties.
-        Borderline errors (surfacing a 0.84 to a 0.85 team) get tiny penalties.
+        R2: Outcome Match (Non-Linear Margin Reward)
+        Applies concave rewards for True Positives/Negatives and convex penalties for False Positives/Negatives.
+        Reduces penalties inside a margin of ambiguity.
         """
         from src.data.team_dataset import TEAM_PROFILES
+        import math
         
-        # Asymmetric penalty multiplier for False Positives (to drive Address Rate up)
-        # We can still apply a multiplier since FP is worse than FN in our usecase
-        fp_alpha = self.config.get("r2_false_positive_penalty", -2.0)
-        # Use absolute value to multiply against the negative distance
-        fp_multiplier = abs(fp_alpha) if abs(fp_alpha) > 1.0 else 1.5 
+        # Dataset-level counts for stable weighting (w)
+        ds_surface = self.dataset_label_counts.get("surface", 1)
+        ds_filter = self.dataset_label_counts.get("filter", 1)
+        ds_total = ds_surface + ds_filter
         
+        w1_base = ds_total / (2.0 * max(1, ds_surface))
+        w0_base = ds_total / (2.0 * max(1, ds_filter))
+        
+        # Hyperparameters
+        alpha = self.config.get("r2_fp_alpha", 1.5)
+        beta = self.config.get("r2_fn_beta", 2.5)
+        p = self.config.get("r2_reward_power", 0.5)
+        q = self.config.get("r2_penalty_power", 2.0)
+        m = self.config.get("r2_margin_width", 0.10)
+        delta = self.config.get("r2_margin_delta", 0.5)
+        
+        def f(x):
+            return x ** p if x > 0 else 0.0
+            
+        def g(x):
+            return abs(x) ** q
+            
         rewards = []
         for dec, label, h, ex_id, team_name in zip(decisions, ground_truth_labels, has_label, example_ids, team_names):
             if not h:
@@ -135,19 +151,27 @@ class DAPORewardScales:
                 
             team_threshold = TEAM_PROFILES.get(team_name, {}).get("rm_threshold", 0.5)
             
+            # Determine if in ambiguity margin
+            in_margin = abs(rm_score - team_threshold) <= m
+            penalty_multiplier = delta if in_margin else 1.0
+            
+            # Item weight based on ground truth class frequency
+            w = w1_base if label == 1 else w0_base
+            
             if dec == "SURFACE":
-                # Distance: (RM Score - Threshold)
                 dist = rm_score - team_threshold
                 if dist >= 0:
-                    r = dist  # True Positive (correctly surfaced)
+                    r = w * f(dist)  # True Positive
                 else:
-                    r = dist * fp_multiplier  # False Positive (wrongly surfaced) — apply multiplier
+                    r = -1.0 * w * alpha * g(dist) * penalty_multiplier  # False Positive
                     
             elif dec == "FILTER":
-                # Distance: (Threshold - RM Score)
                 dist = team_threshold - rm_score
-                r = dist  # Positive if TN, Negative if FN
-                
+                if dist >= 0:
+                    r = w * f(dist)  # True Negative
+                else:
+                    r = -1.0 * w * beta * g(dist) * penalty_multiplier  # False Negative
+                    
             else:
                 r = 0.0  # Invalid decision — R4 handles format penalty
                 
