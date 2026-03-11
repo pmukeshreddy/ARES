@@ -325,10 +325,10 @@ class DAPOTrainer:
             # accumulate valid groups by resampling new prompts until we reach
             # the target batch size. This is the actual DAPO paper algorithm.
             
-            oversample_size = self.group_size * 2
+            oversample_size = self.group_size  # Was *2, now 1x → frees budget for more prompts
             # ── DIAG-3: Log oversample size ──────────────────────
             if step == 0:
-                logger.info(f"  DIAG-3 group_size={self.group_size}, oversample_size={oversample_size} (2x group → more zero-var groups)")
+                logger.info(f"  DIAG-3 group_size={self.group_size}, oversample_size={oversample_size}")
             max_resample_times = self.config.get("max_resample_times", 3)
             target_valid_groups = batch_size  # Need this many groups with variance
             
