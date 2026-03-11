@@ -96,8 +96,10 @@ dapo:
   # Training
   batch_size: 8          # 8 prompts × 8 completions = 64 (same as before, less noise)
   grad_accum_steps: 4    # Accumulate over 4 batches → 32 prompts per update
-  learning_rate: 2.0e-5
+  learning_rate: 5.0e-6
+  lr_schedule: cosine          # cosine decay to prevent late-stage oscillation
   max_steps: 50
+  eval_at_steps: [10, 20, 30, 40, 50]
   lora_sync_interval: 1  # Sync to SGLang every step
   
   # GRPO
@@ -113,11 +115,11 @@ dapo:
   max_new_tokens: 256
   
   # Reward Weights
-  r1_weight: 0.10      # Reasoning quality
-  r2_weight: 0.70      # Outcome match (team labels)
+  r1_weight: 0.15      # Reasoning quality (was 0.10)
+  r2_weight: 0.50      # Outcome match — reduced from 0.70 to reduce dominance
   r3_weight: 0.00      # RM Agreement (dead — IDs mismatched, all scores missing)
-  r4_weight: 0.10      # Format compliance
-  r5_weight: 0.10      # Overlong penalty
+  r4_weight: 0.15      # Format compliance (was 0.10)
+  r5_weight: 0.20      # Overlong penalty (was 0.10)
   
   # R2 configuration
   r2_false_positive_penalty: -1.0

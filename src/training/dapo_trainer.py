@@ -228,11 +228,20 @@ class DAPOTrainer:
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config["learning_rate"])
         
         max_steps = self.config.get("max_steps", 300)
-        from transformers import get_constant_schedule_with_warmup
-        scheduler = get_constant_schedule_with_warmup(
-            optimizer, 
-            num_warmup_steps=int(max_steps * 0.1)
-        )
+        lr_schedule = self.config.get("lr_schedule", "cosine")
+        if lr_schedule == "cosine":
+            from transformers import get_cosine_schedule_with_warmup
+            scheduler = get_cosine_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=int(max_steps * 0.1),
+                num_training_steps=max_steps // self.config.get("grad_accum_steps", 4)
+            )
+        else:
+            from transformers import get_constant_schedule_with_warmup
+            scheduler = get_constant_schedule_with_warmup(
+                optimizer, 
+                num_warmup_steps=int(max_steps * 0.1)
+            )
         batch_size = self.config.get("batch_size", 4)
         
         lora_sync_dir = f"/tmp/lora_dapo_{team_name}"
@@ -241,6 +250,8 @@ class DAPOTrainer:
         lora_sync_interval = self.config.get("lora_sync_interval", 2)
         
         global_step = 0
+        best_eval_accuracy = 0.0
+        best_checkpoint_path = None
         total_steps = max_steps
         
         self.model.train()
@@ -457,26 +468,19 @@ class DAPOTrainer:
                 # Accumulate valid groups
                 n_zero_var = 0
                 n_valid_round = 0
-                n_zerovar_correct = 0  # DIAG-2
-                n_zerovar_wrong = 0    # DIAG-2
                 for g_idx in range(advantages.size(0)):
                     g_std = advantages[g_idx].std().item()
                     
                     if g_std < 1e-5:
                         n_zero_var += 1
-                        # ── DIAG-2: Check if zero-var group was correct or wrong ──
-                        zv_label = flat_labels[g_idx * oversample_size]
-                        zv_decisions = [parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]
-                        zv_majority = max(set(zv_decisions), key=zv_decisions.count) if zv_decisions else None
-                        zv_correct = (zv_majority == "SURFACE" and zv_label == 1) or (zv_majority == "FILTER" and zv_label == 0)
-                        if zv_correct:
-                            n_zerovar_correct += 1
-                        else:
-                            n_zerovar_wrong += 1
+                        # Skip zero-variance groups entirely — no gradient signal
+                        # Punishing confident-correct predictions was counterproductive
                         if step % 5 == 0:
-                            logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority={zv_majority}, CORRECT={zv_correct} → all get -0.2")
-                        # Assign negative advantage to discourage getting stuck
-                        group_advs = torch.full_like(advantages[g_idx], -0.2)
+                            zv_label = flat_labels[g_idx * oversample_size]
+                            zv_decisions = [parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]
+                            zv_majority = max(set(zv_decisions), key=zv_decisions.count) if zv_decisions else None
+                            logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority={zv_majority} → SKIPPED")
+                        continue  # Don't add to accumulated buffers
                     else:
                         n_valid_round += 1
                         group_advs = advantages[g_idx]
@@ -488,7 +492,7 @@ class DAPOTrainer:
                         accumulated_advantages.append(group_advs[idx].item())
                 
                 if step % 5 == 0 and n_zero_var > 0:
-                    logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups: {n_zerovar_correct} CORRECT (punished!), {n_zerovar_wrong} WRONG")
+                    logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups skipped")
                         
                 # 3. After advantage computation, before the zero-variance check - see what the model is actually working with:
                 if step % 5 == 0:
@@ -532,12 +536,11 @@ class DAPOTrainer:
             # This preserves GDPO per-component weighting while keeping advantage
             # magnitudes large enough to produce meaningful gradients.
             adv_std = flat_advantages.std() + 1e-8
-            # ── DIAG-5: Advantage amplification factor ──────────────
+            # Always normalize to unit variance — standard GRPO behavior
+            # Previous conditional amplification (only when std<0.5) was inconsistent
             if step % 5 == 0:
-                amplification = (1.0 / adv_std.item()) if adv_std.item() < 0.5 else 1.0
-                logger.info(f"  DIAG-5 Advantage std={adv_std.item():.4f}, will_amplify={'YES' if adv_std.item() < 0.5 else 'NO'}, factor={amplification:.1f}x")
-            if adv_std < 0.5:
-                flat_advantages = flat_advantages / adv_std
+                logger.info(f"  DIAG-5 Advantage std={adv_std.item():.4f}, normalizing to unit variance")
+            flat_advantages = flat_advantages / adv_std
             
             # 4. After group normalization, before the loss loop - see final advantage distribution:
             logger.info(
@@ -831,10 +834,26 @@ class DAPOTrainer:
                 if len(per_prompt_results) > 10:
                     logger.info(f"    ... ({len(per_prompt_results) - 10} more)")
                 logger.info(f"{'='*60}")
+                
+                # Best checkpoint tracking
+                if eval_acc > best_eval_accuracy:
+                    best_eval_accuracy = eval_acc
+                    best_cp = Path(self.config["output_dir"]) / f"dapo_lora_{team_name}_best"
+                    best_cp.parent.mkdir(parents=True, exist_ok=True)
+                    self.model.save_pretrained(str(best_cp))
+                    best_checkpoint_path = best_cp
+                    logger.info(f"  NEW BEST checkpoint saved (acc={eval_acc*100:.0f}%) → {best_cp}")
         
-        # Save final team LoRA
+        # Save final team LoRA — use best checkpoint if available
         final_out = Path(self.config["output_dir"]) / f"dapo_lora_{team_name}"
         final_out.parent.mkdir(parents=True, exist_ok=True)
-        self.model.save_pretrained(str(final_out))
-        logger.info(f"Team {team_name} training complete. Saved to {final_out}")
+        if best_checkpoint_path and best_checkpoint_path.exists():
+            import shutil as _shutil
+            if final_out.exists():
+                _shutil.rmtree(final_out)
+            _shutil.copytree(best_checkpoint_path, final_out)
+            logger.info(f"Team {team_name} training complete. Using BEST checkpoint (acc={best_eval_accuracy*100:.0f}%) → {final_out}")
+        else:
+            self.model.save_pretrained(str(final_out))
+            logger.info(f"Team {team_name} training complete. Saved final step to {final_out}")
         return final_out
