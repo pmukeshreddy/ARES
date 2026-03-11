@@ -251,6 +251,7 @@ def main():
     parser.add_argument("--teams", nargs="*", default=None, help="Specific teams to evaluate (e.g., pragmatic-shippers)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--k", type=int, default=3, help="KNN k neighbors")
+    parser.add_argument("--max-samples", type=int, default=250, help="Max test samples")
     args = parser.parse_args()
     
     with open(args.config, "r") as f:
@@ -302,7 +303,8 @@ def main():
                 
             metrics, _ = evaluate_greptile_baseline(
                 team_name, val_file, tokenizer, embedder,
-                db_embeddings=db_embeddings, db_labels=db_labels, k=args.k
+                db_embeddings=db_embeddings, db_labels=db_labels, k=args.k,
+                max_samples=args.max_samples
             )
             
             if metrics:
