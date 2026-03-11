@@ -634,7 +634,7 @@ class DAPOTrainer:
                     gen_log_probs = F.log_softmax(gen_logits, dim=-1)
                     token_entropy = -(gen_probs * gen_log_probs).sum(dim=-1)  # H per position
                     
-                    # HIGH-ENTROPY TOKEN MASK: Keep top 80% of tokens to preserve <decision> tags
+                    # HIGH-ENTROPY TOKEN MASK: Keep top 80% of tokens
                     # while dropping the 20% most certain (lowest entropy) boilerplate tokens.
                     rho_keep = 0.8
                     n_tokens = token_entropy.size(0)
@@ -642,60 +642,16 @@ class DAPOTrainer:
                     entropy_threshold = torch.topk(token_entropy, k).values[-1]
                     entropy_mask = (token_entropy >= entropy_threshold).float()
                     
-                    # ── DIAG-4: Entropy mask on decision tokens ──────────
-                    # Find where <decision>SURFACE</decision> or <decision>FILTER</decision> lives
-                    if step % 5 == 0 and mb_idx == 0 and idx == 0:
-                        gen_token_ids = inputs.input_ids[idx, start_idx+1:end_idx+1]  # shifted labels
-                        gen_tokens = self.tokenizer.convert_ids_to_tokens(gen_token_ids.tolist())
-                        # Find decision-region tokens
-                        gen_text_parts = self.tokenizer.decode(gen_token_ids.tolist())
-                        decision_start = gen_text_parts.find('<decision>')
-                        decision_end = gen_text_parts.find('</decision>')
-                        if decision_start >= 0 and decision_end >= 0:
-                            # Map character positions back to token indices (approximate)
-                            chars_so_far = 0
-                            dec_token_indices = []
-                            for t_i, tok in enumerate(gen_tokens):
-                                tok_text = self.tokenizer.convert_tokens_to_string([tok])
-                                tok_start = chars_so_far
-                                tok_end = chars_so_far + len(tok_text)
-                                if tok_end > decision_start and tok_start < (decision_end + len('</decision>')):
-                                    dec_token_indices.append(t_i)
-                                chars_so_far = tok_end
-                            if dec_token_indices:
-                                dec_entropies = token_entropy[dec_token_indices].tolist()
-                                dec_masked = entropy_mask[dec_token_indices].tolist()
-                                all_entropy_mean = token_entropy.mean().item()
-                                threshold_val = entropy_threshold.item()
-                                n_decision_masked_out = sum(1 for m in dec_masked if m == 0.0)
-                                logger.info(
-                                    f"  DIAG-4 Decision tokens ({len(dec_token_indices)} tokens): "
-                                    f"entropies={[f'{e:.3f}' for e in dec_entropies]}, "
-                                    f"masked_out={n_decision_masked_out}/{len(dec_token_indices)}, "
-                                    f"threshold={threshold_val:.3f}, seq_mean_entropy={all_entropy_mean:.3f}"
-                                )
-                                # Show which specific tokens are masked
-                                for di in dec_token_indices:
-                                    tok_str = gen_tokens[di] if di < len(gen_tokens) else '?'
-                                    logger.info(
-                                        f"    token[{di}]='{tok_str}' entropy={token_entropy[di].item():.3f} "
-                                        f"{'KEPT' if entropy_mask[di].item() > 0 else 'MASKED-OUT'}"
-                                    )
-                    
-                    # ── Decision Token Boosting ─────────────────────────
-                    # Give decision-region tokens higher gradient weight so R2's
-                    # signal goes directly to SURFACE/FILTER instead of being
-                    # diluted across ~100 reasoning tokens (~1-2% of sequence).
+                    # ── Detect decision token region (used for mask exemption + boost) ──
                     decision_boost = self.config.get("decision_token_boost", 5.0)
-                    token_weight = torch.ones_like(token_entropy)  # default weight 1.0
-                    
-                    # Decode generated tokens to find <decision>...</decision> region
+                    token_weight = torch.ones_like(token_entropy)
                     gen_token_ids = inputs.input_ids[idx, start_idx+1:end_idx+1]
                     gen_tokens_list = self.tokenizer.convert_ids_to_tokens(gen_token_ids.tolist())
                     gen_text = self.tokenizer.decode(gen_token_ids.tolist())
                     dec_start_char = gen_text.find('<decision>')
                     dec_end_char = gen_text.find('</decision>')
                     
+                    n_exempted = 0
                     if dec_start_char >= 0 and dec_end_char >= 0:
                         dec_end_char += len('</decision>')
                         chars_so_far = 0
@@ -707,11 +663,18 @@ class DAPOTrainer:
                             tok_end = chars_so_far + len(tok_text)
                             if tok_end > dec_start_char and tok_start < dec_end_char:
                                 token_weight[t_i] = decision_boost
+                                entropy_mask[t_i] = 1.0  # Exempt from masking!
+                                n_exempted += 1
                             chars_so_far = tok_end
                     
+                    # ── DIAG-4/6: Decision token diagnostics ──────────
                     if step % 5 == 0 and mb_idx == 0 and idx == 0:
                         n_boosted = (token_weight > 1.0).sum().item()
-                        logger.info(f"  DIAG-6 Decision boost: {n_boosted} tokens boosted {decision_boost}x out of {len(token_weight)} total")
+                        logger.info(
+                            f"  DIAG-4/6 Decision tokens: {n_boosted} boosted {decision_boost}x, "
+                            f"{n_exempted} exempted from entropy mask, "
+                            f"threshold={entropy_threshold.item():.3f}, seq_mean_entropy={token_entropy.mean().item():.3f}"
+                        )
                     
                     # Apply mask and token weight to surrogate loss
                     surr_min = torch.min(surr1, surr2)
