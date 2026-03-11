@@ -137,7 +137,7 @@ class DAPORewardScales:
             elif dec == "FILTER":
                 r = 1.0 * w0 if label == 0 else fn_pen * w1
             else:
-                r = -1.0 # Invalid decision
+                r = 0.0  # Invalid decision — R4 handles format penalty
             rewards.append(r)
         return rewards
 
@@ -151,7 +151,7 @@ class DAPORewardScales:
         for m_score, ex_id in zip(m_scores, example_ids):
             target_score = self.precomputed_scores.get(ex_id)
             if m_score is None or target_score is None:
-                rewards.append(-1.0)
+                rewards.append(0.0)  # Missing score — don't penalize for data pipeline issue
             else:
                 try:
                     score_val = float(m_score)

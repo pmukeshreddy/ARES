@@ -114,8 +114,8 @@ dapo:
   
   # Reward Weights
   r1_weight: 0.10      # Reasoning quality
-  r2_weight: 0.65      # Outcome match (team labels)
-  r3_weight: 0.05      # RM Agreement (noisy, downweighted)
+  r2_weight: 0.70      # Outcome match (team labels)
+  r3_weight: 0.00      # RM Agreement (dead — IDs mismatched, all scores missing)
   r4_weight: 0.10      # Format compliance
   r5_weight: 0.10      # Overlong penalty
   

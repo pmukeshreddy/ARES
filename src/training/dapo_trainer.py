@@ -311,6 +311,12 @@ class DAPOTrainer:
                     sync_path = f"{lora_sync_dir}_step{step}"
                     os.makedirs(sync_path, exist_ok=True)
                     self.model.save_pretrained(sync_path)
+                    # Unload old LoRA from SGLang to avoid memory leak
+                    if current_lora_name is not None:
+                        try:
+                            self.sglang.unload_lora(current_lora_name)
+                        except Exception:
+                            pass  # Non-fatal
                     self.sglang.load_lora(new_lora_name, sync_path)
                 current_lora_name = new_lora_name
                 
@@ -583,10 +589,14 @@ class DAPOTrainer:
                         with self.model.disable_adapter():
                             ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
                     
-                # Calculate logprobs using active policy (current LoRA weights)
-                curr_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                # Single forward pass: get logits for both log_probs AND entropy
+                outputs = self.model(inputs.input_ids, attention_mask=inputs.attention_mask)
+                logits = outputs.logits[:, :-1, :]  # shift for next-token prediction
+                labels = inputs.input_ids[:, 1:]
+                all_log_probs = F.log_softmax(logits, dim=-1)
+                curr_log_probs = torch.gather(all_log_probs, 2, labels.unsqueeze(2)).squeeze(2)
                 
-                # 2. Inside the micro-batch loop, after computing ref and curr logprobs - verify KL is sane:
+                # Verify KL is sane:
                 with torch.no_grad():
                     kl_check = (curr_log_probs - ref_log_probs).mean().item()
                     ratio_check = torch.exp(curr_log_probs - ref_log_probs).mean().item()
@@ -598,10 +608,6 @@ class DAPOTrainer:
                 mb_valid_tokens = 0
                 kl_penalty_weight = self.config.get("kl_penalty", 0.10)
                 entropy_bonus_weight = self.config.get("entropy_bonus", 0.03)
-                
-                # Get full logits for entropy computation
-                outputs = self.model(inputs.input_ids, attention_mask=inputs.attention_mask)
-                logits = outputs.logits[:, :-1, :]  # shift for next-token prediction
                 
                 for idx in range(len(mb_adv)):
                     start_idx = prompt_lens[idx]
@@ -707,8 +713,6 @@ class DAPOTrainer:
                     (mb_loss / num_microbatches).backward()
                     loss_total_logging += mb_loss.item()
             
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
             # Only step every grad_accum_steps to average over more prompts
             if (step + 1) % grad_accum_steps == 0 or step == max_steps - 1:
                 # Log grad norm before stepping
@@ -725,6 +729,7 @@ class DAPOTrainer:
                 grads_norm = grads_norm ** 0.5
                 logger.info(f"  DEBUG Pre-Step: grad_norm={grads_norm:.4f}, active_lora_tensors={n_active}, frozen_lora_tensors={n_frozen}, accum={grad_accum_steps} batches")
                 
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
                 scheduler.step()
             
