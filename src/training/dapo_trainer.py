@@ -371,6 +371,7 @@ class DAPOTrainer:
                 comments = [item["comment"] for item in batch]
                 labels = [item["label"] for item in batch]
                 has_label = [item["has_label"] for item in batch]
+                team_names = [item.get("team", self.team_names[0] if self.team_names else "pragmatic_shippers") for item in batch]
                 example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
                 
                 # 2. Rollout N completions per prompt using SGLang
@@ -391,6 +392,7 @@ class DAPOTrainer:
                 flat_labels = []
                 flat_example_ids = []
                 flat_has_label = []
+                flat_team_names = []
                 
                 for b_idx in range(len(batch)):
                     group_comps = completions_grouped[b_idx]
@@ -401,6 +403,7 @@ class DAPOTrainer:
                     flat_labels.extend([labels[b_idx]] * oversample_size)
                     flat_example_ids.extend([example_ids[b_idx]] * oversample_size)
                     flat_has_label.extend([has_label[b_idx]] * oversample_size)
+                    flat_team_names.extend([team_names[b_idx]] * oversample_size)
                 
                 # Count decisions across ALL completions
                 from src.training.rewards import parse_completion
@@ -429,7 +432,7 @@ class DAPOTrainer:
                 
                 # 3. Compute Rewards
                 rewards, logs = self.reward_scales.compute_total_reward(
-                    flat_completions, flat_diffs, flat_comments, flat_labels, flat_example_ids, flat_has_label, self.config, flat_prompts
+                    flat_completions, flat_diffs, flat_comments, flat_labels, flat_example_ids, flat_has_label, self.config, flat_prompts, flat_team_names
                 )
                 
                 # GDPO: Per-Reward Normalization

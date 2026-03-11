@@ -107,38 +107,50 @@ class DAPORewardScales:
                 
         return rewards
 
-    def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list, has_label: list) -> list:
+    def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list, has_label: list, example_ids: list, team_names: list) -> list:
         """
-        R2: Outcome Match
-        Symmetric penalties with dataset-level inverse class frequency weighting.
-        Uses precomputed dataset label counts (not per-batch) for stable weighting.
+        R2: Outcome Match (Continuous Margin Reward)
+        Reward is the distance between the comment's Phase 1 RM Score and the Team's Threshold.
+        Egregious errors (surfacing a 0.1 to a 0.85 team) get massive penalties.
+        Borderline errors (surfacing a 0.84 to a 0.85 team) get tiny penalties.
         """
-        # Use dataset-level counts for stable weighting
-        ds_surface = self.dataset_label_counts.get("surface", 1)
-        ds_filter = self.dataset_label_counts.get("filter", 1)
-        ds_total = ds_surface + ds_filter
+        from src.data.team_dataset import TEAM_PROFILES
         
-        # Inverse frequency: minority class gets higher weight
-        # e.g., 22 SURFACE / 28 FILTER → w1=50/44=1.136, w0=50/56=0.893
-        w1 = ds_total / (2.0 * max(1, ds_surface))
-        w0 = ds_total / (2.0 * max(1, ds_filter))
-        
-        fp_pen = self.config.get("r2_false_positive_penalty", -1.0)
-        fn_pen = self.config.get("r2_false_negative_penalty", -1.0)
-        tp_reward = self.config.get("r2_true_positive_reward", 1.0)  # Correct SURFACE bonus
+        # Asymmetric penalty multiplier for False Positives (to drive Address Rate up)
+        # We can still apply a multiplier since FP is worse than FN in our usecase
+        fp_alpha = self.config.get("r2_false_positive_penalty", -2.0)
+        # Use absolute value to multiply against the negative distance
+        fp_multiplier = abs(fp_alpha) if abs(fp_alpha) > 1.0 else 1.5 
         
         rewards = []
-        for dec, label, h in zip(decisions, ground_truth_labels, has_label):
+        for dec, label, h, ex_id, team_name in zip(decisions, ground_truth_labels, has_label, example_ids, team_names):
             if not h:
                 rewards.append(0.0)
                 continue
                 
+            rm_score = self.precomputed_scores.get(ex_id)
+            if rm_score is None:
+                # Fallback to binary distance if score is missing
+                rm_score = float(label)
+                
+            team_threshold = TEAM_PROFILES.get(team_name, {}).get("rm_threshold", 0.5)
+            
             if dec == "SURFACE":
-                r = tp_reward * w1 if label == 1 else fp_pen * w0
+                # Distance: (RM Score - Threshold)
+                dist = rm_score - team_threshold
+                if dist >= 0:
+                    r = dist  # True Positive (correctly surfaced)
+                else:
+                    r = dist * fp_multiplier  # False Positive (wrongly surfaced) — apply multiplier
+                    
             elif dec == "FILTER":
-                r = 1.0 * w0 if label == 0 else fn_pen * w1
+                # Distance: (Threshold - RM Score)
+                dist = team_threshold - rm_score
+                r = dist  # Positive if TN, Negative if FN
+                
             else:
                 r = 0.0  # Invalid decision — R4 handles format penalty
+                
             rewards.append(r)
         return rewards
 
@@ -209,7 +221,8 @@ class DAPORewardScales:
                              example_ids: list,
                              has_label: list,
                              config: dict = None,
-                             prompts: list = None) -> dict:
+                             prompts: list = None,
+                             team_names: list = None) -> dict:
         """
         Computes total reward for a batch of completions.
         Returns total_rewards list, per-component reward lists, and a dict of component averages for logging.
@@ -227,8 +240,11 @@ class DAPORewardScales:
         # R1: Rule-based reasoning quality
         r1_scaled = self.compute_r1_reasoning_quality(parsed, diffs, prompts)
         
-        # R2
-        r2 = self.compute_r2_outcome_match(decisions, labels, has_label)
+        # R2: Outcome Match (Continuous Margin Reward)
+        if team_names is None:
+            # Fallback for old/test code
+            team_names = ["pragmatic_shippers"] * len(decisions)
+        r2 = self.compute_r2_outcome_match(decisions, labels, has_label, example_ids, team_names)
         
         # R3: Score Calibration (calibrates <score> output to precomputed target)
         r3 = self.compute_r3_score_calibration(m_scores, example_ids)
