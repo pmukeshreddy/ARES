@@ -129,14 +129,18 @@ class DAPORewardScales:
         beta = self.config.get("r2_fn_beta", 2.5)
         p = self.config.get("r2_reward_power", 0.5)
         q = self.config.get("r2_penalty_power", 2.0)
+        r_power = self.config.get("r2_fn_penalty_power", 0.5)
         m = self.config.get("r2_margin_width", 0.10)
         delta = self.config.get("r2_margin_delta", 0.5)
         
         def f(x):
             return x ** p if x > 0 else 0.0
             
-        def g(x):
+        def g_fp(x):
             return abs(x) ** q
+            
+        def g_fn(x):
+            return abs(x) ** r_power
             
         rewards = []
         for dec, label, h, ex_id, team_name in zip(decisions, ground_truth_labels, has_label, example_ids, team_names):
@@ -163,14 +167,14 @@ class DAPORewardScales:
                 if dist >= 0:
                     r = w * f(dist)  # True Positive
                 else:
-                    r = -1.0 * w * alpha * g(dist) * penalty_multiplier  # False Positive
+                    r = -1.0 * w * alpha * g_fp(dist) * penalty_multiplier  # False Positive
                     
             elif dec == "FILTER":
                 dist = team_threshold - rm_score
                 if dist >= 0:
                     r = w * f(dist)  # True Negative
                 else:
-                    r = -1.0 * w * beta * g(dist) * penalty_multiplier  # False Negative
+                    r = -1.0 * w * beta * g_fn(dist) * penalty_multiplier  # False Negative
                     
             else:
                 r = 0.0  # Invalid decision — R4 handles format penalty
