@@ -371,7 +371,7 @@ class DAPOTrainer:
                 comments = [item["comment"] for item in batch]
                 labels = [item["label"] for item in batch]
                 has_label = [item["has_label"] for item in batch]
-                team_names = [item.get("team", self.team_names[0] if self.team_names else "pragmatic_shippers") for item in batch]
+                team_names = [item.get("team", team_name) for item in batch]
                 example_ids = [item.get("example_id", hashlib.md5(f"{d}_{c}".encode('utf-8')).hexdigest()) for d, c in zip(diffs, comments, strict=False)]
                 
                 # 2. Rollout N completions per prompt using SGLang
