@@ -95,6 +95,7 @@ dapo:
   
   # Training
   batch_size: 8          # 8 prompts × 8 completions = 64 (same as before, less noise)
+  grad_accum_steps: 4    # Accumulate over 4 batches → 32 prompts per update
   learning_rate: 2.0e-5
   max_steps: 50
   lora_sync_interval: 1  # Sync to SGLang every step
