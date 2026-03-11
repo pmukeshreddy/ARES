@@ -326,6 +326,9 @@ class DAPOTrainer:
             # the target batch size. This is the actual DAPO paper algorithm.
             
             oversample_size = self.group_size * 2
+            # ── DIAG-3: Log oversample size ──────────────────────
+            if step == 0:
+                logger.info(f"  DIAG-3 group_size={self.group_size}, oversample_size={oversample_size} (2x group → more zero-var groups)")
             max_resample_times = self.config.get("max_resample_times", 3)
             target_valid_groups = batch_size  # Need this many groups with variance
             
@@ -438,14 +441,39 @@ class DAPOTrainer:
                 
                 advantages = adv_r1 + adv_r2 + adv_r3 + adv_r4 + adv_r5
                 
+                # ── DIAG-1: GDPO scale mismatch ──────────────────────
+                # If components have very different scales after mean-sub,
+                # one component dominates the advantage signal.
+                if step % 5 == 0:
+                    for comp_name, comp_adv in [("R1", adv_r1), ("R2", adv_r2), ("R3", adv_r3), ("R4", adv_r4), ("R5", adv_r5)]:
+                        c_std = comp_adv.std().item()
+                        c_absmax = comp_adv.abs().max().item()
+                        logger.info(f"  DIAG-1 {comp_name} after GDPO: std={c_std:.4f}, absmax={c_absmax:.4f}")
+                    total_std = advantages.std().item()
+                    r2_contribution = (adv_r2.abs().sum() / max(1e-8, advantages.abs().sum())).item()
+                    logger.info(f"  DIAG-1 Total adv std={total_std:.4f}, R2 contributes {r2_contribution*100:.1f}% of |advantage|")
+                
                 # Accumulate valid groups
                 n_zero_var = 0
                 n_valid_round = 0
+                n_zerovar_correct = 0  # DIAG-2
+                n_zerovar_wrong = 0    # DIAG-2
                 for g_idx in range(advantages.size(0)):
                     g_std = advantages[g_idx].std().item()
                     
                     if g_std < 1e-5:
                         n_zero_var += 1
+                        # ── DIAG-2: Check if zero-var group was correct or wrong ──
+                        zv_label = flat_labels[g_idx * oversample_size]
+                        zv_decisions = [parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]
+                        zv_majority = max(set(zv_decisions), key=zv_decisions.count) if zv_decisions else None
+                        zv_correct = (zv_majority == "SURFACE" and zv_label == 1) or (zv_majority == "FILTER" and zv_label == 0)
+                        if zv_correct:
+                            n_zerovar_correct += 1
+                        else:
+                            n_zerovar_wrong += 1
+                        if step % 5 == 0:
+                            logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority={zv_majority}, CORRECT={zv_correct} → all get -0.2")
                         # Assign negative advantage to discourage getting stuck
                         group_advs = torch.full_like(advantages[g_idx], -0.2)
                     else:
@@ -457,6 +485,9 @@ class DAPOTrainer:
                         accumulated_prompts.append(flat_prompts[flat_idx])
                         accumulated_completions.append(flat_completions[flat_idx])
                         accumulated_advantages.append(group_advs[idx].item())
+                
+                if step % 5 == 0 and n_zero_var > 0:
+                    logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups: {n_zerovar_correct} CORRECT (punished!), {n_zerovar_wrong} WRONG")
                         
                 # 3. After advantage computation, before the zero-variance check - see what the model is actually working with:
                 if step % 5 == 0:
@@ -500,6 +531,10 @@ class DAPOTrainer:
             # This preserves GDPO per-component weighting while keeping advantage
             # magnitudes large enough to produce meaningful gradients.
             adv_std = flat_advantages.std() + 1e-8
+            # ── DIAG-5: Advantage amplification factor ──────────────
+            if step % 5 == 0:
+                amplification = (1.0 / adv_std.item()) if adv_std.item() < 0.5 else 1.0
+                logger.info(f"  DIAG-5 Advantage std={adv_std.item():.4f}, will_amplify={'YES' if adv_std.item() < 0.5 else 'NO'}, factor={amplification:.1f}x")
             if adv_std < 0.5:
                 flat_advantages = flat_advantages / adv_std
             
@@ -605,6 +640,46 @@ class DAPOTrainer:
                     k = max(1, int(n_tokens * rho_keep))
                     entropy_threshold = torch.topk(token_entropy, k).values[-1]
                     entropy_mask = (token_entropy >= entropy_threshold).float()
+                    
+                    # ── DIAG-4: Entropy mask on decision tokens ──────────
+                    # Find where <decision>SURFACE</decision> or <decision>FILTER</decision> lives
+                    if step % 5 == 0 and mb_idx == 0 and idx == 0:
+                        gen_token_ids = inputs.input_ids[idx, start_idx+1:end_idx+1]  # shifted labels
+                        gen_tokens = self.tokenizer.convert_ids_to_tokens(gen_token_ids.tolist())
+                        # Find decision-region tokens
+                        gen_text_parts = self.tokenizer.decode(gen_token_ids.tolist())
+                        decision_start = gen_text_parts.find('<decision>')
+                        decision_end = gen_text_parts.find('</decision>')
+                        if decision_start >= 0 and decision_end >= 0:
+                            # Map character positions back to token indices (approximate)
+                            chars_so_far = 0
+                            dec_token_indices = []
+                            for t_i, tok in enumerate(gen_tokens):
+                                tok_text = self.tokenizer.convert_tokens_to_string([tok])
+                                tok_start = chars_so_far
+                                tok_end = chars_so_far + len(tok_text)
+                                if tok_end > decision_start and tok_start < (decision_end + len('</decision>')):
+                                    dec_token_indices.append(t_i)
+                                chars_so_far = tok_end
+                            if dec_token_indices:
+                                dec_entropies = token_entropy[dec_token_indices].tolist()
+                                dec_masked = entropy_mask[dec_token_indices].tolist()
+                                all_entropy_mean = token_entropy.mean().item()
+                                threshold_val = entropy_threshold.item()
+                                n_decision_masked_out = sum(1 for m in dec_masked if m == 0.0)
+                                logger.info(
+                                    f"  DIAG-4 Decision tokens ({len(dec_token_indices)} tokens): "
+                                    f"entropies={[f'{e:.3f}' for e in dec_entropies]}, "
+                                    f"masked_out={n_decision_masked_out}/{len(dec_token_indices)}, "
+                                    f"threshold={threshold_val:.3f}, seq_mean_entropy={all_entropy_mean:.3f}"
+                                )
+                                # Show which specific tokens are masked
+                                for di in dec_token_indices:
+                                    tok_str = gen_tokens[di] if di < len(gen_tokens) else '?'
+                                    logger.info(
+                                        f"    token[{di}]='{tok_str}' entropy={token_entropy[di].item():.3f} "
+                                        f"{'KEPT' if entropy_mask[di].item() > 0 else 'MASKED-OUT'}"
+                                    )
                     
                     # Apply mask to surrogate loss
                     surr_min = torch.min(surr1, surr2)
