@@ -42,7 +42,7 @@ class SGLangBridge:
         })
         return resp.json()
 
-    def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256, tokenizer=None) -> List[List[str]]:
+    def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256, tokenizer=None, temperature=0.8) -> List[List[str]]:
         """Generates N completions per prompt using SGLang's API."""
         url = f"{self.base_url}/generate"
         results = []
@@ -61,7 +61,7 @@ class SGLangBridge:
             payload = {
                 "text": formatted_prompt,
                 "sampling_params": {
-                    "temperature": 1.0, # High temp to encourage exploration
+                    "temperature": temperature,
                     "top_p": 0.95,
                     "n": n,             # Natively sample N diverse completions!
                     "max_new_tokens": max_tokens
@@ -268,7 +268,8 @@ class DAPOTrainer:
         sft_eval_completions = self.sglang.generate(
             prompts=sft_eval_prompts, lora_path=sft_lora_name,
             n=1, max_tokens=self.config.get("max_new_tokens", 256),
-            tokenizer=self.tokenizer
+            tokenizer=self.tokenizer,
+            temperature=self.config.get("temperature", 0.8)
         )
         
         from src.training.rewards import parse_completion
@@ -367,7 +368,8 @@ class DAPOTrainer:
                     lora_path=current_lora_name,
                     n=oversample_size,
                     max_tokens=self.config.get("max_new_tokens", 512),
-                    tokenizer=self.tokenizer
+                    tokenizer=self.tokenizer,
+                    temperature=self.config.get("temperature", 0.8)
                 )
                 
                 # Flatten for reward computation
