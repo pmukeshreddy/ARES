@@ -229,18 +229,19 @@ class DAPOTrainer:
         
         max_steps = self.config.get("max_steps", 300)
         lr_schedule = self.config.get("lr_schedule", "cosine")
+        num_optimizer_steps = max_steps // self.config.get("grad_accum_steps", 4)
         if lr_schedule == "cosine":
             from transformers import get_cosine_schedule_with_warmup
             scheduler = get_cosine_schedule_with_warmup(
                 optimizer,
-                num_warmup_steps=int(max_steps * 0.1),
-                num_training_steps=max_steps // self.config.get("grad_accum_steps", 4)
+                num_warmup_steps=max(1, int(num_optimizer_steps * 0.1)),
+                num_training_steps=num_optimizer_steps
             )
         else:
             from transformers import get_constant_schedule_with_warmup
             scheduler = get_constant_schedule_with_warmup(
                 optimizer, 
-                num_warmup_steps=int(max_steps * 0.1)
+                num_warmup_steps=max(1, int(num_optimizer_steps * 0.1))
             )
         batch_size = self.config.get("batch_size", 4)
         
@@ -761,6 +762,12 @@ class DAPOTrainer:
                 else:
                     eval_data = train_dataset
                 
+                # Regenerate prompts from current template (same as 03_train_dapo.py)
+                from src.data.team_dataset import generate_prompt
+                for item in eval_data:
+                    if "diff" in item and "comment" in item:
+                        item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
+                
                 eval_size = min(20, len(eval_data))
                 eval_batch = random.sample(eval_data, eval_size)
                 eval_prompts = [item["prompt"] for item in eval_batch]
@@ -774,13 +781,12 @@ class DAPOTrainer:
                     temperature=self.config.get("temperature", 0.8)
                 )
                 
-                # Per-completion metrics (matches training reporting)
-                eval_correct = 0
-                eval_total = 0
-                eval_tp = 0
-                eval_fp = 0
-                eval_fn = 0
-                eval_tn = 0
+                # Majority-vote metrics (matches production eval)
+                mv_correct = 0
+                mv_tp = 0
+                mv_fp = 0
+                mv_fn = 0
+                mv_tn = 0
                 per_prompt_results = []
                 
                 gt_surface = sum(1 for l in eval_labels if l == 1)
@@ -788,61 +794,59 @@ class DAPOTrainer:
                 logger.info(f"  GT distribution: {gt_surface} SURFACE / {gt_filter} FILTER")
                 
                 for i in range(eval_size):
-                    prompt_votes = []
+                    votes = []
                     for comp in eval_completions[i]:
                         parsed = parse_completion(comp)
                         dec = parsed["decision"]
-                        gt_label = eval_labels[i]
-                        gt = "SURFACE" if gt_label == 1 else "FILTER"
-                        
-                        if dec == "SURFACE":
-                            eval_total += 1
-                            if gt_label == 1:
-                                eval_tp += 1
-                                eval_correct += 1
-                            else:
-                                eval_fp += 1
-                        elif dec == "FILTER":
-                            eval_total += 1
-                            if gt_label == 0:
-                                eval_tn += 1
-                                eval_correct += 1
-                            else:
-                                eval_fn += 1
-                        
                         if dec in ("SURFACE", "FILTER"):
-                            prompt_votes.append(dec)
+                            votes.append(dec)
                     
-                    # Show per-prompt majority for readability
-                    gt = "SURFACE" if eval_labels[i] == 1 else "FILTER"
-                    if prompt_votes:
-                        n_surf = sum(1 for v in prompt_votes if v == "SURFACE")
-                        majority = "SURFACE" if n_surf > len(prompt_votes) / 2 else "FILTER"
+                    gt_label = eval_labels[i]
+                    gt = "SURFACE" if gt_label == 1 else "FILTER"
+                    
+                    if not votes:
+                        per_prompt_results.append(f"[?] GT={gt:7s} Majority=INVALID (0/0S)")
+                        continue
+                    
+                    n_surf = sum(1 for v in votes if v == "SURFACE")
+                    majority = "SURFACE" if n_surf > len(votes) / 2 else "FILTER"
+                    majority_label = 1 if majority == "SURFACE" else 0
+                    
+                    if gt_label == majority_label:
+                        mv_correct += 1
+                    if gt_label == 1 and majority_label == 1:
+                        mv_tp += 1
+                    elif gt_label == 0 and majority_label == 1:
+                        mv_fp += 1
+                    elif gt_label == 1 and majority_label == 0:
+                        mv_fn += 1
                     else:
-                        majority = "INVALID"
-                    mark = "✓" if majority == gt else "✗"
-                    per_prompt_results.append(f"[{mark}] GT={gt:7s} Majority={majority} ({n_surf if prompt_votes else 0}/{len(prompt_votes)}S)")
+                        mv_tn += 1
+                    
+                    mark = "✓" if gt_label == majority_label else "✗"
+                    per_prompt_results.append(f"[{mark}] GT={gt:7s} Majority={majority} ({n_surf}/{len(votes)}S)")
                 
-                eval_acc = eval_correct / max(1, eval_total)
-                eval_addr = eval_tp / max(1, eval_tp + eval_fp) * 100
+                mv_total = mv_tp + mv_fp + mv_fn + mv_tn
+                mv_acc = mv_correct / max(1, mv_total)
+                mv_addr = mv_tp / max(1, mv_tp + mv_fp) * 100
                 
-                logger.info(f"  Per-completion accuracy: {eval_correct}/{eval_total} ({eval_acc*100:.0f}%)")
-                logger.info(f"  Per-completion Address Rate: {eval_addr:.0f}%")
-                logger.info(f"  TP={eval_tp} FP={eval_fp} FN={eval_fn} TN={eval_tn}")
+                logger.info(f"  Majority-vote accuracy: {mv_correct}/{mv_total} ({mv_acc*100:.0f}%)")
+                logger.info(f"  Majority-vote Address Rate: {mv_addr:.0f}%")
+                logger.info(f"  TP={mv_tp} FP={mv_fp} FN={mv_fn} TN={mv_tn}")
                 for r in per_prompt_results[:10]:
                     logger.info(f"    {r}")
                 if len(per_prompt_results) > 10:
                     logger.info(f"    ... ({len(per_prompt_results) - 10} more)")
                 logger.info(f"{'='*60}")
                 
-                # Best checkpoint tracking
-                if eval_acc > best_eval_accuracy:
-                    best_eval_accuracy = eval_acc
+                # Best checkpoint tracking — use majority-vote address rate
+                if mv_addr > best_eval_accuracy:
+                    best_eval_accuracy = mv_addr
                     best_cp = Path(self.config["output_dir"]) / f"dapo_lora_{team_name}_best"
                     best_cp.parent.mkdir(parents=True, exist_ok=True)
                     self.model.save_pretrained(str(best_cp))
                     best_checkpoint_path = best_cp
-                    logger.info(f"  NEW BEST checkpoint saved (acc={eval_acc*100:.0f}%) → {best_cp}")
+                    logger.info(f"  NEW BEST checkpoint saved (addr_rate={mv_addr:.0f}%) → {best_cp}")
         
         # Save final team LoRA — use best checkpoint if available
         final_out = Path(self.config["output_dir"]) / f"dapo_lora_{team_name}"

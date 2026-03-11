@@ -122,5 +122,5 @@ dapo:
   r5_weight: 0.20      # Overlong penalty (was 0.10)
   
   # R2 configuration
-  r2_false_positive_penalty: -1.0
+  r2_false_positive_penalty: -2.0   # 2x penalty for wrong SURFACE — drives higher address rate
   r2_false_negative_penalty: -1.0
