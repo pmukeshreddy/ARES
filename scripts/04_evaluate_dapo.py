@@ -136,7 +136,7 @@ def generate_completions(prompts: list, lora_name: str, tokenizer, n: int = 8, m
         payload = {
             "text": formatted,
             "sampling_params": {
-                "temperature": 1.0,
+                "temperature": 0.8,
                 "top_p": 0.95,
                 "n": n,
                 "max_new_tokens": max_tokens
