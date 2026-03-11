@@ -125,6 +125,7 @@ class DAPORewardScales:
         
         fp_pen = self.config.get("r2_false_positive_penalty", -1.0)
         fn_pen = self.config.get("r2_false_negative_penalty", -1.0)
+        tp_reward = self.config.get("r2_true_positive_reward", 1.0)  # Correct SURFACE bonus
         
         rewards = []
         for dec, label, h in zip(decisions, ground_truth_labels, has_label):
@@ -133,7 +134,7 @@ class DAPORewardScales:
                 continue
                 
             if dec == "SURFACE":
-                r = 1.0 * w1 if label == 1 else fp_pen * w0
+                r = tp_reward * w1 if label == 1 else fp_pen * w0
             elif dec == "FILTER":
                 r = 1.0 * w0 if label == 0 else fn_pen * w1
             else:
