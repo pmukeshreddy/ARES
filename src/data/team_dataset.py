@@ -11,46 +11,67 @@ logger = logging.getLogger(__name__)
 TEAM_PROFILES = {
     "Pragmatic-Shippers": {
         "context": (
-            "We are an early-stage startup team that ships fast. "
-            "We prioritize catastrophic bugs, logic errors that could break the app, "
-            "and architectural failures. We also care about correctness issues, "
-            "missing edge cases, potential data loss, and subtle bugs that could "
-            "cause production incidents — even if the comment seems minor at first glance. "
-            "We tend to skip purely stylistic feedback or minor refactoring suggestions."
+            "Our priorities (SURFACE any comment matching these):\n"
+            "- Bug reports: logic errors, off-by-one, null handling, race conditions\n"
+            "- Correctness: wrong behavior, missing validation, broken edge cases\n"
+            "- Architecture: poor abstractions, coupling issues, scaling concerns\n"
+            "- Data safety: potential data loss, corruption, or security issues\n"
+            "- Subtle issues: comments that look minor but point to real problems\n\n"
+            "Lower priority (FILTER these):\n"
+            "- Pure style/formatting with no functional impact\n"
+            "- Subjective preferences with no clear improvement"
         ),
         "rm_threshold": 0.85
     },
     "Thorough-Mentors": {
         "context": (
-            "We are an open-source maintainer team focused on teaching and community growth. "
-            "We surface suggestions, alternative approaches, design patterns, edge cases, "
-            "and anything that could help contributors learn. We are generous with feedback."
+            "Our priorities (SURFACE any comment matching these):\n"
+            "- Learning opportunities: alternative approaches, design patterns\n"
+            "- Best practices: suggestions that help contributors grow\n"
+            "- Edge cases: any scenario the author may not have considered\n"
+            "- Code quality: readability, maintainability, documentation improvements\n"
+            "- Community standards: anything that helps align with project norms\n\n"
+            "Lower priority (FILTER these):\n"
+            "- Obviously trivial or auto-fixable issues (trailing whitespace, etc.)"
         ),
         "rm_threshold": 0.30
     },
     "Security-First": {
         "context": (
-            "We are a high-security backend team. We prioritize vulnerabilities, "
-            "SQL injection, buffer overflows, input validation, and auth issues. "
-            "We also care about data leaks and unsafe defaults. "
-            "We tend to skip purely stylistic comments."
+            "Our priorities (SURFACE any comment matching these):\n"
+            "- Vulnerabilities: SQL injection, XSS, buffer overflows, SSRF\n"
+            "- Auth issues: broken access control, missing validation, token handling\n"
+            "- Input validation: unsanitized user input, missing bounds checks\n"
+            "- Data exposure: leaking secrets, PII, or internal details\n"
+            "- Unsafe defaults: permissive configs, disabled security features\n\n"
+            "Lower priority (FILTER these):\n"
+            "- Pure style comments with no security implications"
         ),
         "rm_threshold": 0.70
     },
     "Performance-Obsessed": {
         "context": (
-            "We are a low-latency trading systems team. We prioritize O(N) complexity, "
-            "memory allocations, caching, and CPU cycles. We also care about "
-            "unnecessary copies, lock contention, and GC pressure. "
-            "We tend to skip minor refactoring unless it improves performance."
+            "Our priorities (SURFACE any comment matching these):\n"
+            "- Complexity: O(N²) loops, unnecessary iterations, algorithmic issues\n"
+            "- Memory: unnecessary allocations, copies, or leaks\n"
+            "- Concurrency: lock contention, thread safety, deadlock risks\n"
+            "- Caching: missed caching opportunities, cache invalidation bugs\n"
+            "- GC pressure: object churn, large temporary allocations\n\n"
+            "Lower priority (FILTER these):\n"
+            "- Minor refactoring that doesn't impact performance"
         ),
         "rm_threshold": 0.65
     },
     "Style-Sticklers": {
         "context": (
-            "We are a frontend foundational UI team. Consistency is paramount. "
-            "We care about naming conventions, strict typing, linting rules, "
-            "formatting, and documentation. We surface most feedback."
+            "Our priorities (SURFACE any comment matching these):\n"
+            "- Naming: inconsistent or unclear variable/function names\n"
+            "- Types: missing or incorrect type annotations\n"
+            "- Formatting: violations of team lint rules or style guide\n"
+            "- Documentation: missing/outdated docstrings, unclear comments\n"
+            "- Consistency: patterns that diverge from codebase conventions\n\n"
+            "Lower priority (FILTER these):\n"
+            "- Comments that are purely about logic/architecture with no style aspect"
         ),
         "rm_threshold": 0.50
     }
@@ -66,17 +87,19 @@ def generate_prompt(diff: str, comment: str, team_name: str) -> str:
     context = TEAM_PROFILES[canonical]["context"]
     
     prompt = (
-        f"You are an AI code review routing assistant. Your job is to decide "
-        f"whether a review comment is relevant enough for a specific engineering team to see.\n\n"
-        f"<team_context>\n{context}\n</team_context>\n\n"
-        f"Below is a code diff and a proposed review comment.\n"
+        f"You are an AI code review routing assistant. You classify review comments as "
+        f"SURFACE (the team should see this) or FILTER (the team can skip this).\n\n"
+        f"<team_priorities>\n{context}\n</team_priorities>\n\n"
         f"<diff>\n{diff[:1500]}\n</diff>\n\n"
         f"<comment>\n{comment}\n</comment>\n\n"
-        f"Decide whether to SURFACE (show to the team) or FILTER (hide from the team).\n"
-        f"In your reasoning, consider BOTH why this comment might be relevant to the team "
-        f"AND why it might not be. Then make your final call.\n\n"
-        f"Output your reasoning inside <think> tags, followed by a probability score between 0.0 and 1.0 in <score> tags, "
-        f"and finally your decision (<decision>SURFACE</decision> or <decision>FILTER</decision>).\n"
+        f"Evaluate the comment against the team's priorities. In your <think> block:\n"
+        f"1. What specific issue does the comment raise? (factual summary)\n"
+        f"2. Does it match any of the team's stated priorities? (check each)\n"
+        f"3. Is the issue actionable — does it point to a concrete problem or improvement?\n\n"
+        f"Based on your evaluation, output a confidence score in <score> tags and your "
+        f"decision in <decision> tags (SURFACE or FILTER).\n\n"
+        f"Note: Approximately half of comments are worth surfacing. When in doubt and "
+        f"the comment raises a plausible technical concern, lean toward SURFACE.\n"
     )
     return prompt
 
