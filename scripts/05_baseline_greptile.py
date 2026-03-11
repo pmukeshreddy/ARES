@@ -126,20 +126,21 @@ def compute_team_embeddings(team_name: str, train_file: Path, embedder):
         
     team_data = load_team_data(train_file)
     
-    comments = [item["comment"] for item in team_data]
+    # Embed diff+comment (same inputs DAPO sees) for fair comparison
+    texts = [f"{item.get('diff', '')[:1024]} [SEP] {item['comment']}" for item in team_data]
     labels = [item["label"] for item in team_data]
                 
     n_surface = sum(1 for l in labels if l == 1)
     n_filter = sum(1 for l in labels if l == 0)
-    logger.info(f"Team '{team_name}' Vector Database: {n_surface} SURFACE, {n_filter} FILTER individual comment embeddings.")
+    logger.info(f"Team '{team_name}' Vector Database: {n_surface} SURFACE, {n_filter} FILTER (diff+comment embeddings)")
     
-    if not comments:
+    if not texts:
         logger.warning(f"No training data found for team '{team_name}'. Skipping.")
         return None, None
         
-    logger.info("Computing individual embeddings for KNN Vector DB...")
+    logger.info("Computing diff+comment embeddings for KNN Vector DB...")
     with torch.no_grad():
-        embeddings = embedder.encode(comments, convert_to_tensor=True)
+        embeddings = embedder.encode(texts, convert_to_tensor=True)
         embeddings = F.normalize(embeddings, p=2, dim=1)
         
     labels_tensor = torch.tensor(labels, dtype=torch.long)
@@ -162,13 +163,14 @@ def evaluate_greptile_baseline(team_name: str, test_file: Path, embedder, db_emb
     
     results = []
     
-    # Use existing comments from the dataset (same comments DAPO evaluates)
+    # Embed diff+comment (same inputs DAPO sees) for fair comparison
+    texts = [f"{item.get('diff', '')[:1024]} [SEP] {item['comment']}" for item in dataset]
     comments = [item["comment"] for item in dataset]
     
-    # Embed the test comments for querying the Vector DB
-    logger.info("Embedding test comments for KNN lookup...")
+    # Embed the test diff+comment for querying the Vector DB
+    logger.info("Embedding test diff+comment for KNN lookup...")
     with torch.no_grad():
-        test_embeddings = embedder.encode(comments, convert_to_tensor=True)
+        test_embeddings = embedder.encode(texts, convert_to_tensor=True)
         test_embeddings = F.normalize(test_embeddings, p=2, dim=1)
         
         # Move db tensors to same device as test embeddings

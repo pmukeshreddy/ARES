@@ -104,7 +104,7 @@ def generate_prompt(diff: str, comment: str, team_name: str) -> str:
     return prompt
 
 
-def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None, rm_tokenizer=None):
+def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None, rm_tokenizer=None, precomputed_scores_path: str = None):
     """
     Reads the processed HF dataset and distributes samples into 5 team buckets.
     Uses the Phase 1 Reward Model (F1=0.99) to score each comment's actionability,
@@ -113,9 +113,23 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
+    # Load precomputed RM scores if available (for continuous thresholds)
+    precomputed_scores = {}
+    if precomputed_scores_path and Path(precomputed_scores_path).exists():
+        import hashlib
+        with open(precomputed_scores_path, "r") as f:
+            precomputed_scores = json.load(f)
+        logger.info(f"Loaded {len(precomputed_scores)} precomputed RM scores for continuous thresholds")
+    elif rm_model is None:
+        logger.warning("No RM model or precomputed scores — team thresholds will be ineffective (binary labels)")
+    
     # Initialize buckets for balancing
     team_data_surface = {team: [] for team in TEAM_PROFILES.keys()}
     team_data_filter = {team: [] for team in TEAM_PROFILES.keys()}
+    
+    # Track seen comments for deduplication
+    seen_comments = set()
+    skipped_dupes = 0
     
     logger.info(f"Loading base dataset from {hf_dataset_path}")
     # Load dataset
@@ -137,7 +151,7 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
                 break
                 
         if all_full:
-            logger.info("All team buckets perfectly filled (125 SURFACE / 125 FILTER)! Stopping early.")
+            logger.info("All team buckets perfectly filled (175 SURFACE / 175 FILTER)! Stopping early.")
             break
             
         data = json.loads(line)
@@ -145,6 +159,13 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
         diff = data.get("diff_hunk", "")
         # Real world label (did it get acted on?)
         original_label = data.get("label", 0)
+        
+        # Deduplicate by comment text (prevents "no issues found" from flooding FILTER)
+        comment_key = comment.strip().lower()
+        if comment_key in seen_comments:
+            skipped_dupes += 1
+            continue
+        seen_comments.add(comment_key)
         
         # 5. Generate Phase 1 RM Score
         rm_score = 0.0
@@ -157,6 +178,11 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
             with torch.no_grad():
                 output = rm_model(inputs["input_ids"], inputs["attention_mask"])
                 rm_score = torch.sigmoid(output).item()
+        elif precomputed_scores:
+            # Use precomputed continuous RM score for meaningful team thresholds
+            import hashlib
+            example_id = data.get("example_id", hashlib.md5(f"{diff}_{comment}".encode('utf-8')).hexdigest())
+            rm_score = precomputed_scores.get(example_id, float(original_label))
         else:
             # Fallback to original label if RM not provided
             rm_score = float(original_label)
@@ -188,6 +214,8 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
                     "team": team_name
                 }
                 team_data_filter[team_name].append(sample)
+    
+    logger.info(f"Skipped {skipped_dupes} duplicate comments during data generation")
     
     # Save datasets
     # The requirement is 100 train samples, 200+ test samples per team
@@ -228,4 +256,7 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    simulate_team_datasets("data/processed/train.jsonl", "data/teams/")
+    simulate_team_datasets(
+        "data/processed/train.jsonl", "data/teams/",
+        precomputed_scores_path="data/precomputed_rm_scores.json"
+    )
