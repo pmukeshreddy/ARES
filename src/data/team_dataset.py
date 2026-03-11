@@ -205,4 +205,4 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    simulate_team_datasets("data/processed/train_small.jsonl", "data/teams/")
+    simulate_team_datasets("data/processed/train.jsonl", "data/teams/")
