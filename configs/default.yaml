@@ -108,7 +108,7 @@ dapo:
   kl_penalty: 0.05
   entropy_bonus: 0.01    # Token-level entropy bonus to prevent policy collapse
   temperature: 0.8       # Generation temperature (was 1.0, lowered to reduce invalid format)
-  decision_token_boost: 5.0  # Boost gradient on <decision> tokens by 5x
+  decision_token_boost: 1.0  # Just exempt from mask, no extra boost
   max_new_tokens: 256
   
   # Reward Weights
