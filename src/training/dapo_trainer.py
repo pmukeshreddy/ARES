@@ -746,6 +746,87 @@ class DAPOTrainer:
                     f"R2(Match): {logs['r2']:.2f} | "
                     f"Total R: {logs['total_reward']:.2f} | Format: {logs['valid_format_ratio']*100:.0f}%"
                 )
+            
+            # ── Mid-Training Evaluation ──────────────────────────
+            eval_at_steps = self.config.get("eval_at_steps", [15, 30])
+            if isinstance(eval_at_steps, int):
+                eval_at_steps = [eval_at_steps]
+            
+            if global_step in eval_at_steps:
+                logger.info(f"\n{'='*60}")
+                logger.info(f"MID-TRAINING EVAL at step {global_step}")
+                logger.info(f"{'='*60}")
+                
+                # Use test set if available, else train set
+                test_file = Path(f"data/teams/{team_name}/test.jsonl")
+                if test_file.exists():
+                    eval_data = [json.loads(l) for l in open(test_file)]
+                else:
+                    eval_data = train_dataset
+                
+                eval_size = min(20, len(eval_data))
+                eval_batch = random.sample(eval_data, eval_size)
+                eval_prompts = [item["prompt"] for item in eval_batch]
+                eval_labels = [item["label"] for item in eval_batch]
+                
+                num_votes = 8
+                eval_completions = self.sglang.generate(
+                    prompts=eval_prompts, lora_path=current_lora_name,
+                    n=num_votes, max_tokens=self.config.get("max_new_tokens", 256),
+                    tokenizer=self.tokenizer,
+                    temperature=self.config.get("temperature", 0.8)
+                )
+                
+                # Per-completion accuracy
+                eval_correct = 0
+                eval_total = 0
+                eval_tp = 0
+                eval_fp = 0
+                eval_fn = 0
+                per_prompt_results = []
+                
+                for i in range(eval_size):
+                    votes = []
+                    for comp in eval_completions[i]:
+                        parsed = parse_completion(comp)
+                        dec = parsed["decision"]
+                        if dec in ("SURFACE", "FILTER"):
+                            votes.append(dec)
+                    
+                    if votes:
+                        # Majority vote
+                        n_surf = sum(1 for v in votes if v == "SURFACE")
+                        majority = "SURFACE" if n_surf > len(votes) / 2 else "FILTER"
+                    else:
+                        majority = "INVALID"
+                    
+                    gt = "SURFACE" if eval_labels[i] == 1 else "FILTER"
+                    match = majority == gt
+                    if match:
+                        eval_correct += 1
+                    eval_total += 1
+                    
+                    if majority == "SURFACE" and gt == "SURFACE":
+                        eval_tp += 1
+                    elif majority == "SURFACE" and gt == "FILTER":
+                        eval_fp += 1
+                    elif majority == "FILTER" and gt == "SURFACE":
+                        eval_fn += 1
+                    
+                    mark = "✓" if match else "✗"
+                    per_prompt_results.append(f"[{mark}] GT={gt:7s} Pred={majority}")
+                
+                eval_acc = eval_correct / max(1, eval_total)
+                eval_addr = eval_tp / max(1, eval_tp + eval_fp) * 100
+                
+                logger.info(f"  Accuracy: {eval_correct}/{eval_total} ({eval_acc*100:.0f}%)")
+                logger.info(f"  Address Rate: {eval_addr:.0f}%")
+                logger.info(f"  TP={eval_tp} FP={eval_fp} FN={eval_fn}")
+                for r in per_prompt_results[:10]:
+                    logger.info(f"    {r}")
+                if len(per_prompt_results) > 10:
+                    logger.info(f"    ... ({len(per_prompt_results) - 10} more)")
+                logger.info(f"{'='*60}")
         
         # Save final team LoRA
         final_out = Path(self.config["output_dir"]) / f"dapo_lora_{team_name}"
