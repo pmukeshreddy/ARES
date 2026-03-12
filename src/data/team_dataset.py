@@ -149,10 +149,9 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
                 data["_rm_score"] = precomputed_scores[example_id]
                 parsed_lines.append((data, line))
                 
-        # Sort by distance to the median threshold (0.65) so borderline items come first
-        parsed_lines.sort(key=lambda x: abs(x[0]["_rm_score"] - 0.65))
         lines = [line for _, line in parsed_lines]
-        logger.info(f"Loaded {len(lines)} scored items. Sorted by distance to 0.65 threshold.")
+        random.shuffle(lines)
+        logger.info(f"Loaded {len(lines)} scored items. Randomly shuffled.")
     else:
         random.shuffle(lines)
         logger.info(f"Loaded {len(lines)} total items. Beginning RM scoring and dynamic distribution...")
