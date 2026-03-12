@@ -43,64 +43,71 @@ class SGLangBridge:
         return resp.json()
 
     def generate(self, prompts: List[str], lora_path: str, n=8, max_tokens=256, tokenizer=None, temperature=0.8) -> List[List[str]]:
-        """Generates N completions per prompt using SGLang's API."""
+        """Generates N completions per prompt using SGLang's API in a single batched request."""
         url = f"{self.base_url}/generate"
-        results = []
         
+        # 1. Format all prompts first
+        formatted_prompts = []
         for p in prompts:
-            # Format prompt with ChatML template
             if tokenizer is not None:
                 messages = [
                     {"role": "system", "content": "You are a helpful AI code reviewer."},
                     {"role": "user", "content": p}
                 ]
-                formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+                formatted_prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             else:
-                formatted_prompt = f"<|im_start|>system\nYou are a helpful AI code reviewer.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
-                
-            payload = {
-                "text": formatted_prompt,
-                "sampling_params": {
-                    "temperature": temperature,
-                    "top_p": 0.95,
-                    "n": n,             # Natively sample N diverse completions!
-                    "max_new_tokens": max_tokens
-                },
-                "lora_path": lora_path
-            }
+                formatted_prompts.append(f"<|im_start|>system\nYou are a helpful AI code reviewer.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n")
+
+        # 2. Fire single batched request
+        payload = {
+            "text": formatted_prompts,
+            "sampling_params": {
+                "temperature": temperature,
+                "top_p": 0.95,
+                "n": n,
+                "max_new_tokens": max_tokens
+            },
+            "lora_path": lora_path
+        }
+        
+        logger.info(f"SGLang generating {len(prompts)} prompts (batch of {n} each) using lora_path='{lora_path}'")
+        
+        try:
+            resp = requests.post(url, json=payload).json()
             
-            try:
-                if len(results) == 0:
-                    logger.info(f"SGLang generate using lora_path='{lora_path}'")
-                resp = requests.post(url, json=payload).json()
-                
-                # Handle both old and new SGLang response formats:
-                # Old: {"text": ["completion1", "completion2", ...]}
-                # New: [{"text": "completion1"}, {"text": "completion2"}, ...]
-                if isinstance(resp, list):
-                    completions = [item.get("text", "") if isinstance(item, dict) else str(item) for item in resp]
-                elif isinstance(resp, dict):
-                    completions = resp.get("text", [])
-                    if not isinstance(completions, list):
-                        completions = [completions]
-                else:
-                    completions = []
+            # SGLang batch response format for 'text: [prompts...]':
+            # It returns a flat list where elements are ordered: [p1_c1, p1_c2...p1_cn, p2_c1...p2_cn, ...]
+            # We need to chunk them back into List[List[str]]
+            
+            flat_completions = []
+            if isinstance(resp, list):
+                flat_completions = [item.get("text", "") if isinstance(item, dict) else str(item) for item in resp]
+            elif isinstance(resp, dict):
+                flat_completions = resp.get("text", [])
+                if not isinstance(flat_completions, list):
+                    flat_completions = [flat_completions]
                     
-                # Pad with empty strings if it failed to return exactly N
-                while len(completions) < n:
-                    completions.append("")
+            logger.info(f"SGLang returned {len(flat_completions)} total text elements.")
+            
+            # 3. Chunk the flat list back into per-prompt lists
+            results = []
+            expected_total = len(prompts) * n
+            
+            # If for some reason SGLang returned fewer than expected, pad the rest
+            while len(flat_completions) < expected_total:
+                flat_completions.append("")
                 
-                # Just log the first prompt's first completion for debugging
-                if len(results) == 0:
-                    logger.info(f"SGLang raw response type: {type(resp).__name__}, snippet: {str(resp)[:300]}")
-                    
-                results.append(completions[:n])
+            for i in range(len(prompts)):
+                start_idx = i * n
+                end_idx = start_idx + n
+                results.append(flat_completions[start_idx:end_idx])
                 
-            except Exception as e:
-                logger.error(f"SGLang generation failed: {e}")
-                results.append([""] * n)
-                
-        return results
+            return results
+            
+        except Exception as e:
+            logger.error(f"SGLang batched generation failed: {e}")
+            # Return list of empty completions as fallback
+            return [[""] * n for _ in prompts]
 
     def reload_lora(self, lora_name: str, lora_path: str):
         """Instructs SGLang to dynamically reload the LoRA adapter."""
