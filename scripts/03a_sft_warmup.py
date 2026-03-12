@@ -414,8 +414,14 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to config file")
+    parser.add_argument("--teams", type=str, default=None, help="Comma-separated team names to train (snake_case)")
+    args = parser.parse_args()
+
     PROJECT_ROOT = Path(__file__).parent.parent
-    with open(PROJECT_ROOT / "configs/default.yaml", "r") as f:
+    with open(PROJECT_ROOT / args.config, "r") as f:
         config = yaml.safe_load(f)
     
     dapo_config = config["dapo"]
@@ -469,12 +475,6 @@ def main():
     
     # SFT warm-up for selected teams
     from src.data.team_dataset import TEAM_PROFILES
-    
-    # Parse --teams argument
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--teams", type=str, default=None, help="Comma-separated team names to train (snake_case)")
-    args = parser.parse_args()
     
     # Build team list: filter by --teams if provided
     _team_name_lookup = {k.lower().replace('-', '_'): k for k in TEAM_PROFILES}
