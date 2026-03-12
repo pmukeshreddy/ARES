@@ -636,6 +636,10 @@ class DAPOTrainer:
                 all_log_probs = F.log_softmax(logits, dim=-1)
                 curr_log_probs = torch.gather(all_log_probs, 2, labels.unsqueeze(2)).squeeze(2)
                 
+                # In PPO/GRPO, the old policy is the one that generated the rollouts.
+                # Since we do 1 epoch, it's just the current detached probabilities.
+                old_log_probs = curr_log_probs.detach()
+                
                 # Verify KL is sane:
                 with torch.no_grad():
                     kl_check = (curr_log_probs - ref_log_probs).mean().item()
@@ -657,9 +661,10 @@ class DAPOTrainer:
                         continue 
                         
                     curr_logp = curr_log_probs[idx, start_idx:end_idx]
+                    old_logp = old_log_probs[idx, start_idx:end_idx]
                     ref_logp = ref_log_probs[idx, start_idx:end_idx]
                     
-                    ratio = torch.exp(curr_logp - ref_logp)
+                    ratio = torch.exp(curr_logp - old_logp)
                     adv = mb_adv[idx]
                     
                     surr1 = ratio * adv
@@ -672,8 +677,8 @@ class DAPOTrainer:
                     )
                     surr2 = ratio_clipped * adv
                     
-                    # KL divergence estimator (standard PPO approximation: log(π_ref/π_theta))
-                    kl = ref_logp - curr_logp
+                    # KL divergence estimator (standard PPO approximation: log(π_theta/π_ref))
+                    kl = curr_logp - ref_logp
                     
                     # Token-level entropy of the policy's distribution
                     # H(π) = -Σ p(token) * log(p(token)) at each generated position
@@ -759,8 +764,8 @@ class DAPOTrainer:
                 
                 if mb_valid_tokens > 0:
                     mb_loss = mb_loss / mb_valid_tokens
-                    # Scale for accumulation
-                    (mb_loss / num_microbatches).backward()
+                    # Scale for accumulation across microbatches AND accumulation steps
+                    (mb_loss / (num_microbatches * grad_accum_steps)).backward()
                     loss_total_logging += mb_loss.item()
             
             # Only step every grad_accum_steps to average over more prompts
