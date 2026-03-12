@@ -208,7 +208,7 @@ class DAPORewardScales:
             elif dec == "FILTER":
                 dist = neg_margin
                 if dist >= 0:
-                    r = 1.5 * w * f(dist)  # True Negative (1.5x boost)
+                    r = w * f(dist)  # True Negative
                 else:
                     r = -1.0 * w * beta * g_fn(dist) * penalty_multiplier * bias_penalty
                     
