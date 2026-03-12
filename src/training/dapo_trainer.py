@@ -484,7 +484,12 @@ class DAPOTrainer:
                     return torch.where(mask, (t - m) / (s + 1e-8), torch.zeros_like(t))
                 
                 adv_r1 = normalize_within_group(r1_tensor) * w_r1
-                adv_r2 = normalize_within_group(r2_tensor) * w_r2
+                
+                # Fix 7: Do not std-normalize R2. It is binary within groups. 
+                # Mean subtraction preserves the magnitude gap between TP and FP.
+                r2_mean = r2_tensor.mean(dim=1, keepdim=True)
+                adv_r2 = (r2_tensor - r2_mean) * w_r2
+                
                 adv_r3 = normalize_within_group(r3_tensor) * w_r3
                 adv_r4 = normalize_within_group(r4_tensor) * w_r4
                 adv_r5 = normalize_within_group(r5_tensor) * w_r5
