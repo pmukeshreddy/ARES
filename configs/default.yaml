@@ -95,11 +95,11 @@ dapo:
   
   # Training
   batch_size: 8          # 8 prompts × 8 completions = 64 (same as before, less noise)
-  grad_accum_steps: 4    # Accumulate over 4 batches → 32 prompts per update
-  learning_rate: 5.0e-6
+  grad_accum_steps: 2    # Accumulate over 4 batches → 32 prompts per update
+  learning_rate: 5.0e-5
   lr_schedule: cosine          # cosine decay to prevent late-stage oscillation
-  max_steps: 50
-  eval_at_steps: [10, 20, 30, 40, 50]
+  max_steps: 100
+  eval_at_steps: [20, 40, 60, 80, 100]
   lora_sync_interval: 1  # Sync to SGLang every step
   
   # GRPO
