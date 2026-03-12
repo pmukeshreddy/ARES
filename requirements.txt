@@ -26,5 +26,4 @@ langdetect>=1.0.9
 
 # Optional
 # wandb>=0.16.0
-sglang[all]
 jinja2>=3.1.0
