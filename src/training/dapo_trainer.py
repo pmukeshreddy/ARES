@@ -26,14 +26,24 @@ class SGLangBridge:
     def load_lora(self, lora_name: str, lora_path: str):
         """Dynamically load/reload a LoRA adapter into SGLang."""
         logger.info(f"Loading LoRA '{lora_name}' from path: {lora_path}")
-        resp = requests.post(f"{self.base_url}/load_lora_adapter", json={
-            "lora_name": lora_name,
-            "lora_path": lora_path,
-        })
-        logger.info(f"LoRA load response [{resp.status_code}]: {resp.text[:300]}")
-        if resp.status_code != 200:
-            logger.error(f"Failed to load LoRA: {resp.text}")
-        return resp.json()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(f"{self.base_url}/load_lora_adapter", json={
+                    "lora_name": lora_name,
+                    "lora_path": lora_path,
+                }, timeout=10)
+                logger.info(f"LoRA load response [{resp.status_code}]: {resp.text[:300]}")
+                if resp.status_code != 200:
+                    logger.error(f"Failed to load LoRA: {resp.text}")
+                return resp.json()
+            except Exception as e:
+                logger.error(f"SGLang load_lora connection error (attempt {attempt+1}/{max_retries}): {e}")
+                import time
+                time.sleep(5)
+                
+        # If all retries fail, return an empty dict to avoid crashing the whole script
+        return {}
 
     def unload_lora(self, lora_name: str):
         """Unload a LoRA adapter from SGLang."""
@@ -72,9 +82,21 @@ class SGLangBridge:
         
         logger.info(f"SGLang generating {len(prompts)} prompts (batch of {n} each) using lora_path='{lora_path}'")
         
+        max_retries = 3
+        resp = None
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(url, json=payload, timeout=600).json() # 10 minute timeout for huge batches
+                break
+            except Exception as e:
+                logger.error(f"SGLang generate batched connection error (attempt {attempt+1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(10) # Wait 10 seconds for SGLang to recover before retrying
+                else:
+                    return [[""] * n for _ in prompts]
+                    
         try:
-            resp = requests.post(url, json=payload).json()
-            
             # SGLang batch response format for 'text: [prompts...]':
             # It returns a flat list where elements are ordered: [p1_c1, p1_c2...p1_cn, p2_c1...p2_cn, ...]
             # We need to chunk them back into List[List[str]]
