@@ -124,12 +124,12 @@ class DAPORewardScales:
         w1_base = ds_total / (2.0 * max(1, ds_surface))
         w0_base = ds_total / (2.0 * max(1, ds_filter))
         
-        # Hyperparameters
-        alpha = self.config.get("r2_fp_alpha", 3.0)  # Massive penalty for False Positives
-        beta = self.config.get("r2_fn_beta", 0.5)    # Very small penalty for False Negatives
+        # Hyperparameters (Fix 1: Symmetric Penalties)
+        alpha = self.config.get("r2_fp_alpha", 1.5)  # Revert from 3.0 to lessen harshness
+        beta = self.config.get("r2_fn_beta", 1.0)    # Increase from 0.5 to balance
         p = self.config.get("r2_reward_power", 0.5)
-        q = self.config.get("r2_penalty_power", 2.0)
-        r_power = self.config.get("r2_fn_penalty_power", 0.5)
+        q = self.config.get("r2_penalty_power", 1.0) # Down from 2.0 (Linear instead of convex)
+        r_power = self.config.get("r2_fn_penalty_power", 1.0) # Up from 0.5 (Linear instead of concave)
         m = self.config.get("r2_margin_width", 0.10)
         delta = self.config.get("r2_margin_delta", 0.5)
         
@@ -162,8 +162,13 @@ class DAPORewardScales:
         
         # We apply a penalty proportional to how far the model deviates from the GT distribution.
         # This penalizes generic "SURFACE everything" or "FILTER everything" collapse.
-        # Max penalty scale is bounded.
-        bias_penalty = 1.0 + (rate_diff * 2.0) # e.g., if 20% off, multiply penalties by 1.4x
+        # (Fix 2: EMA smoothing across steps instead of per-batch noise)
+        if not hasattr(self, "_ema_rate_diff"):
+            self._ema_rate_diff = rate_diff
+        else:
+            self._ema_rate_diff = 0.9 * self._ema_rate_diff + 0.1 * rate_diff
+            
+        bias_penalty = 1.0 + (self._ema_rate_diff * 1.0) # Smoothed multiplier
             
         rewards = []
         for dec, label, h, ex_id, team_name in zip(decisions, ground_truth_labels, has_label, example_ids, team_names):

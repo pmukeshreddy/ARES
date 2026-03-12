@@ -452,9 +452,10 @@ class DAPOTrainer:
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
-                    """Dr.GRPO: subtract mean only, no std division."""
+                    """Dr.GRPO with Std Normalization: subtract mean and divide by std."""
                     m = t.mean(dim=1, keepdim=True)
-                    return t - m
+                    s = t.std(dim=1, keepdim=True) + 1e-8
+                    return (t - m) / s
                 
                 adv_r1 = normalize_within_group(r1_tensor) * w_r1
                 adv_r2 = normalize_within_group(r2_tensor) * w_r2
@@ -823,7 +824,7 @@ class DAPOTrainer:
                         continue
                     
                     n_surf = sum(1 for v in votes if v == "SURFACE")
-                    majority = "SURFACE" if n_surf >= 6 else "FILTER"
+                    majority = "SURFACE" if n_surf > len(votes) // 2 else "FILTER"
                     majority_label = 1 if majority == "SURFACE" else 0
                     
                     if gt_label == majority_label:
