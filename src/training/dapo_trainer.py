@@ -816,7 +816,7 @@ class DAPOTrainer:
                         continue
                     
                     n_surf = sum(1 for v in votes if v == "SURFACE")
-                    majority = "SURFACE" if n_surf > len(votes) / 2 else "FILTER"
+                    majority = "SURFACE" if n_surf >= 6 else "FILTER"
                     majority_label = 1 if majority == "SURFACE" else 0
                     
                     if gt_label == majority_label:

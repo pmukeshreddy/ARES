@@ -125,8 +125,8 @@ class DAPORewardScales:
         w0_base = ds_total / (2.0 * max(1, ds_filter))
         
         # Hyperparameters
-        alpha = self.config.get("r2_fp_alpha", 1.5)
-        beta = self.config.get("r2_fn_beta", 1.5)
+        alpha = self.config.get("r2_fp_alpha", 3.0)  # Massive penalty for False Positives
+        beta = self.config.get("r2_fn_beta", 0.5)    # Very small penalty for False Negatives
         p = self.config.get("r2_reward_power", 0.5)
         q = self.config.get("r2_penalty_power", 2.0)
         r_power = self.config.get("r2_fn_penalty_power", 0.5)

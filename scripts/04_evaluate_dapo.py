@@ -288,8 +288,8 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
             n_tie += 1
             continue
         
-        # Majority vote (ties go to FILTER since it's the conservative choice)
-        majority = 1 if n_s > (n_valid / 2) else 0
+        # Super-majority vote (require at least 6 SURFACE votes for high precision)
+        majority = 1 if n_s >= 6 else 0
         
         gt_str = "SURFACE" if gt == 1 else "FILTER"
         pred_str = "SURFACE" if majority == 1 else "FILTER"
