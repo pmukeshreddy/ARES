@@ -122,5 +122,5 @@ dapo:
   r5_weight: 0.20      # Overlong penalty (was 0.10)
   
   # R2 configuration
-  r2_fp_alpha: 2.0    # Previously named r2_false_positive_penalty
-  r2_fn_beta: 1.5     # Previously named r2_false_negative_penalty
+  r2_fp_alpha: 3.0    # Previously named r2_false_positive_penalty
+  r2_fn_beta: 1.0     # Previously named r2_false_negative_penalty

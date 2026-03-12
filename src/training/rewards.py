@@ -124,9 +124,9 @@ class DAPORewardScales:
         w1_base = ds_total / (2.0 * max(1, ds_surface))
         w0_base = ds_total / (2.0 * max(1, ds_filter))
         
-        # Hyperparameters (Fix 1: Symmetric Penalties)
-        alpha = self.config.get("r2_fp_alpha", 1.5)  # Revert from 3.0 to lessen harshness
-        beta = self.config.get("r2_fn_beta", 1.5)    # Increase to 1.5 to balance perfectly with alpha
+        # Hyperparameters (Fix 1: Asymmetric Penalties)
+        alpha = self.config.get("r2_fp_alpha", 3.0)  # FP penalty (wrong SURFACE)
+        beta = self.config.get("r2_fn_beta", 1.0)    # FN penalty (wrong FILTER)
         p = self.config.get("r2_reward_power", 0.5)
         q = self.config.get("r2_penalty_power", 1.0) # Down from 2.0 (Linear instead of convex)
         r_power = self.config.get("r2_fn_penalty_power", 1.0) # Up from 0.5 (Linear instead of concave)
@@ -166,9 +166,9 @@ class DAPORewardScales:
         if not hasattr(self, "_ema_rate_diff"):
             self._ema_rate_diff = rate_diff
         else:
-            self._ema_rate_diff = 0.9 * self._ema_rate_diff + 0.1 * rate_diff
+            self._ema_rate_diff = 0.7 * self._ema_rate_diff + 0.3 * rate_diff
             
-        bias_penalty = 1.0 + (self._ema_rate_diff * 1.0) # Smoothed multiplier
+        bias_penalty = 1.0 + (self._ema_rate_diff * 3.0) # Smoothed multiplier
             
         rewards = []
         for dec, label, h, team_name, rm_score in zip(decisions, ground_truth_labels, has_label, team_names, rm_scores):
@@ -208,7 +208,7 @@ class DAPORewardScales:
             elif dec == "FILTER":
                 dist = neg_margin
                 if dist >= 0:
-                    r = w * f(dist)  # True Negative
+                    r = 1.5 * w * f(dist)  # True Negative (1.5x boost)
                 else:
                     r = -1.0 * w * beta * g_fn(dist) * penalty_multiplier * bias_penalty
                     
