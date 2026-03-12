@@ -135,9 +135,27 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
     # Load dataset
     with open(hf_dataset_path, "r") as f:
         lines = f.readlines()
-        random.shuffle(lines)
         
-    logger.info(f"Loaded {len(lines)} total items. Beginning RM scoring and dynamic distribution...")
+    if precomputed_scores:
+        import hashlib
+        parsed_lines = []
+        for line in lines:
+            data = json.loads(line)
+            comment = data.get("comment", "")
+            diff = data.get("diff_hunk", "")
+            example_id = data.get("example_id", hashlib.md5(f"{diff}_{comment}".encode('utf-8')).hexdigest())
+            
+            if example_id in precomputed_scores:
+                data["_rm_score"] = precomputed_scores[example_id]
+                parsed_lines.append((data, line))
+                
+        # Sort by distance to the median threshold (0.65) so borderline items come first
+        parsed_lines.sort(key=lambda x: abs(x[0]["_rm_score"] - 0.65))
+        lines = [line for _, line in parsed_lines]
+        logger.info(f"Loaded {len(lines)} scored items. Sorted by distance to 0.65 threshold.")
+    else:
+        random.shuffle(lines)
+        logger.info(f"Loaded {len(lines)} total items. Beginning RM scoring and dynamic distribution...")
     
     # We need 175 SURFACE and 175 FILTER samples per team (350 total = 100 train / 250 test)
     TARGET_PER_CLASS = 175
