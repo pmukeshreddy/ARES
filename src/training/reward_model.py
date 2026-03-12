@@ -208,15 +208,24 @@ class RewardModel(nn.Module):
             tokenizer.pad_token = tokenizer.eos_token
             tokenizer.pad_token_id = tokenizer.eos_token_id
         
-        # Load base model
-        backbone = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-            attn_implementation="flash_attention_2",
-            # Don't load to GPU yet, let caller handle device placement
-            device_map=None,
-        )
+        # Load base model with safe Flash Attention fallback
+        try:
+            backbone = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                attn_implementation="flash_attention_2",
+                device_map=None,
+            )
+        except Exception as e:
+            logger.warning(f"Flash Attention 2 failed to load ({e}). Falling back to 'sdpa' (PyTorch Native).")
+            backbone = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                attn_implementation="sdpa",
+                device_map=None,
+            )
         
         # Disable generation head (we only need hidden states)
         backbone.config.use_cache = False
@@ -296,14 +305,24 @@ class RewardModel(nn.Module):
             model_name, trust_remote_code=True
         )
         
-        # Load base model + LoRA
-        base_model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-            attn_implementation="flash_attention_2",
-            device_map=None,
-        )
+        # Load base model + LoRA with fallback
+        try:
+            base_model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                attn_implementation="flash_attention_2",
+                device_map=None,
+            )
+        except Exception as e:
+            logger.warning(f"Flash Attention 2 failed to load checkpoint ({e}). Falling back to 'sdpa'.")
+            base_model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                attn_implementation="sdpa",
+                device_map=None,
+            )
         base_model.config.use_cache = False
         
         backbone = PeftModel.from_pretrained(
