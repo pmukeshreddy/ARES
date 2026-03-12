@@ -8,8 +8,8 @@ def run_tuning():
     print("🚀 Starting DAPO Hyperparameter Tuning...\n")
     
     # Backup original config
-    original_config_path = "config.yaml"
-    backup_path = "config_tuning_backup.yaml"
+    original_config_path = "configs/default.yaml"
+    backup_path = "configs/default_tuning_backup.yaml"
     if os.path.exists(original_config_path):
         import shutil
         shutil.copy(original_config_path, backup_path)
