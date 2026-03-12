@@ -107,7 +107,7 @@ class DAPORewardScales:
                 
         return rewards
 
-    def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list, has_label: list, example_ids: list, team_names: list) -> list:
+    def compute_r2_outcome_match(self, decisions: list, ground_truth_labels: list, has_label: list, example_ids: list, team_names: list, rm_scores: list) -> list:
         """
         R2: Outcome Match (Non-Linear Margin Reward)
         Applies concave rewards for True Positives/Negatives and convex penalties for False Positives/Negatives.
@@ -171,15 +171,10 @@ class DAPORewardScales:
         bias_penalty = 1.0 + (self._ema_rate_diff * 1.0) # Smoothed multiplier
             
         rewards = []
-        for dec, label, h, ex_id, team_name in zip(decisions, ground_truth_labels, has_label, example_ids, team_names):
+        for dec, label, h, team_name, rm_score in zip(decisions, ground_truth_labels, has_label, team_names, rm_scores):
             if not h:
                 rewards.append(0.0)
                 continue
-                
-            rm_score = self.precomputed_scores.get(ex_id)
-            if rm_score is None:
-                # Fallback to binary distance if score is missing
-                rm_score = float(label)
                 
             team_threshold = TEAM_PROFILES.get(team_name, {}).get("rm_threshold", 0.5)
             
@@ -223,15 +218,14 @@ class DAPORewardScales:
             rewards.append(r)
         return rewards
 
-    def compute_r3_score_calibration(self, m_scores: list, example_ids: list) -> list:
+    def compute_r3_score_calibration(self, m_scores: list, rm_scores: list) -> list:
         """
         R3: Score Calibration
         Compares DAPO model's `<score>` against the Phase 1 RM precomputed score.
         Reward = 1.0 - (2.0 * |dapo_score - rm_score|)
         """
         rewards = []
-        for m_score, ex_id in zip(m_scores, example_ids):
-            target_score = self.precomputed_scores.get(ex_id)
+        for m_score, target_score in zip(m_scores, rm_scores):
             if m_score is None or target_score is None:
                 rewards.append(0.0)  # Missing score — don't penalize for data pipeline issue
             else:
@@ -291,7 +285,8 @@ class DAPORewardScales:
                              has_label: list,
                              config: dict = None,
                              prompts: list = None,
-                             team_names: list = None) -> dict:
+                             team_names: list = None,
+                             rm_scores: list = None) -> dict:
         """
         Computes total reward for a batch of completions.
         Returns total_rewards list, per-component reward lists, and a dict of component averages for logging.
@@ -313,10 +308,15 @@ class DAPORewardScales:
         if team_names is None:
             # Fallback for old/test code
             team_names = ["pragmatic_shippers"] * len(decisions)
-        r2 = self.compute_r2_outcome_match(decisions, labels, has_label, example_ids, team_names)
+            
+        if rm_scores is None:
+            # Fallback if trainer doesn't pass it yet
+            rm_scores = [float(l) for l in labels]
+            
+        r2 = self.compute_r2_outcome_match(decisions, labels, has_label, example_ids, team_names, rm_scores)
         
         # R3: Score Calibration (calibrates <score> output to precomputed target)
-        r3 = self.compute_r3_score_calibration(m_scores, example_ids)
+        r3 = self.compute_r3_score_calibration(m_scores, rm_scores)
         
         # R4
         r4 = self.compute_r4_format(format_scores)
