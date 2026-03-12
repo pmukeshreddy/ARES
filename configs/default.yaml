@@ -111,7 +111,7 @@ dapo:
   kl_penalty: 0.05
   entropy_bonus: 0.01    # Token-level entropy bonus to prevent policy collapse
   temperature: 0.8       # Generation temperature (was 1.0, lowered to reduce invalid format)
-  decision_token_boost: 1.0  # Just exempt from mask, no extra boost
+  decision_token_boost: 5.0  # Boost gradient on <decision> tokens to fix reward dilution
   max_new_tokens: 256
   
   # Reward Weights
@@ -122,6 +122,5 @@ dapo:
   r5_weight: 0.20      # Overlong penalty (was 0.10)
   
   # R2 configuration
-  r2_true_positive_reward: 1.5    # +1.5 for correct SURFACE — requires ~55% confidence
-  r2_false_positive_penalty: -2.0   # 2x penalty for wrong SURFACE — drives higher address rate
-  r2_false_negative_penalty: -1.0
+  r2_fp_alpha: 2.0    # Previously named r2_false_positive_penalty
+  r2_fn_beta: 1.5     # Previously named r2_false_negative_penalty

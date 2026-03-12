@@ -667,8 +667,8 @@ class DAPOTrainer:
                     )
                     surr2 = ratio_clipped * adv
                     
-                    # KL divergence estimator
-                    kl = torch.exp(ref_logp - curr_logp) - (ref_logp - curr_logp) - 1.0
+                    # KL divergence estimator (standard PPO approximation: log(π_ref/π_theta))
+                    kl = ref_logp - curr_logp
                     
                     # Token-level entropy of the policy's distribution
                     # H(π) = -Σ p(token) * log(p(token)) at each generated position
@@ -701,13 +701,23 @@ class DAPOTrainer:
                         for t_i, tok in enumerate(gen_tokens_list):
                             if t_i >= len(token_weight):
                                 break
-                            tok_text = self.tokenizer.convert_tokens_to_string([tok])
+                            
+                            # Safely convert to string, handling Qwen tokenizer bytes/strings
+                            if isinstance(tok, bytes):
+                                tok_text = tok.decode('utf-8', errors='replace')
+                            else:
+                                tok_text = self.tokenizer.convert_tokens_to_string([tok])
+                                
                             tok_start = chars_so_far
                             tok_end = chars_so_far + len(tok_text)
-                            if tok_end > dec_start_char and tok_start < dec_end_char:
+                            
+                            # INTERSECTION check rather than strict bounds check
+                            # This fixes the bug where token boundaries don't perfectly align with char boundaries
+                            if tok_start < dec_end_char and tok_end > dec_start_char:
                                 token_weight[t_i] = decision_boost
                                 entropy_mask[t_i] = 1.0  # Exempt from masking!
                                 n_exempted += 1
+                                
                             chars_so_far = tok_end
                     
                     # ── DIAG-4/6: Decision token diagnostics ──────────
