@@ -162,15 +162,26 @@ class DAPORewardScales:
             # Item weight based on ground truth class frequency
             w = w1_base if label == 1 else w0_base
             
+            # Normalize the margin so that valid range is always [0, 1] for positives 
+            # and [-1, 0) for negatives, regardless of asymmetric thresholds.
+            if rm_score >= team_threshold:
+                dist_above = (rm_score - team_threshold) / max(0.001, 1.0 - team_threshold)
+                pos_margin = dist_above
+                neg_margin = -dist_above
+            else:
+                dist_below = (team_threshold - rm_score) / max(0.001, team_threshold)
+                pos_margin = -dist_below
+                neg_margin = dist_below
+            
             if dec == "SURFACE":
-                dist = rm_score - team_threshold
+                dist = pos_margin
                 if dist >= 0:
                     r = w * f(dist)  # True Positive
                 else:
                     r = -1.0 * w * alpha * g_fp(dist) * penalty_multiplier  # False Positive
                     
             elif dec == "FILTER":
-                dist = team_threshold - rm_score
+                dist = neg_margin
                 if dist >= 0:
                     r = w * f(dist)  # True Negative
                 else:
