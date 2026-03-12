@@ -263,7 +263,7 @@ class DAPOTrainer:
         # ── SFT Baseline Eval ────────────────────────────────
         # Generate completions from the SFT warmup weights to verify
         # balanced starting point before DAPO training begins.
-        sft_eval_size = min(100, len(train_dataset))
+        sft_eval_size = min(250, len(train_dataset))
         sft_eval_batch = random.sample(train_dataset, sft_eval_size)
         sft_eval_prompts = [item["prompt"] for item in sft_eval_batch]
         sft_eval_labels = [item["label"] for item in sft_eval_batch]
@@ -771,7 +771,7 @@ class DAPOTrainer:
                     if "diff" in item and "comment" in item:
                         item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
                 
-                eval_size = min(100, len(eval_data))
+                eval_size = min(250, len(eval_data))
                 # Use a specific Random instance so we get the exact same eval subset 
                 # every time without affecting the global random state for training.
                 import random as _random
