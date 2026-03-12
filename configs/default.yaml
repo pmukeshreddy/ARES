@@ -82,7 +82,7 @@ embeddings:
 
 # ─── Phase 2 DAPO ───────────
 dapo:
-  model_name: "Qwen/Qwen2.5-Coder-7B-Instruct"
+  model_name: "Qwen/Qwen3-4B-Instruct-2507"
   output_dir: "checkpoints/dapo"
   precomputed_scores_path: "data/precomputed_rm_scores.json"
   unlabeled_data_path: "data/unlabeled_pairs.json"
