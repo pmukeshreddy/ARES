@@ -125,8 +125,8 @@ class DAPORewardScales:
         w0_base = ds_total / (2.0 * max(1, ds_filter))
         
         # Hyperparameters
-        alpha = self.config.get("r2_fp_alpha", 0.375)
-        beta = self.config.get("r2_fn_beta", 0.625)
+        alpha = self.config.get("r2_fp_alpha", 1.5)
+        beta = self.config.get("r2_fn_beta", 1.5)
         p = self.config.get("r2_reward_power", 0.5)
         q = self.config.get("r2_penalty_power", 2.0)
         r_power = self.config.get("r2_fn_penalty_power", 0.5)
@@ -141,6 +141,29 @@ class DAPORewardScales:
             
         def g_fn(x):
             return abs(x) ** r_power
+            
+        # Batch-level bias penalty (Fix 2)
+        # Calculate ground truth base rate for this exact batch
+        valid_labels = [l for h, l in zip(has_label, ground_truth_labels) if h]
+        if valid_labels:
+            gt_surface_rate = sum(1 for l in valid_labels if l == 1) / len(valid_labels)
+        else:
+            gt_surface_rate = 0.5
+            
+        # Calculate policy rate for this exact batch (only counting valid decisions)
+        valid_decs = [d for h, d in zip(has_label, decisions) if h and d in ("SURFACE", "FILTER")]
+        if valid_decs:
+            pred_surface_rate = sum(1 for d in valid_decs if d == "SURFACE") / len(valid_decs)
+        else:
+            pred_surface_rate = 0.5
+            
+        # How far off is the model's base rate?
+        rate_diff = abs(pred_surface_rate - gt_surface_rate)
+        
+        # We apply a penalty proportional to how far the model deviates from the GT distribution.
+        # This penalizes generic "SURFACE everything" or "FILTER everything" collapse.
+        # Max penalty scale is bounded.
+        bias_penalty = 1.0 + (rate_diff * 2.0) # e.g., if 20% off, multiply penalties by 1.4x
             
         rewards = []
         for dec, label, h, ex_id, team_name in zip(decisions, ground_truth_labels, has_label, example_ids, team_names):
@@ -178,14 +201,16 @@ class DAPORewardScales:
                 if dist >= 0:
                     r = w * f(dist)  # True Positive
                 else:
-                    r = -1.0 * w * alpha * g_fp(dist) * penalty_multiplier  # False Positive
+                    # Apply bias_penalty to mistakes so the model can't hack the reward
+                    # by just skewing completely towards one class
+                    r = -1.0 * w * alpha * g_fp(dist) * penalty_multiplier * bias_penalty
                     
             elif dec == "FILTER":
                 dist = neg_margin
                 if dist >= 0:
                     r = w * f(dist)  # True Negative
                 else:
-                    r = -1.0 * w * beta * g_fn(dist) * penalty_multiplier  # False Negative
+                    r = -1.0 * w * beta * g_fn(dist) * penalty_multiplier * bias_penalty
                     
             else:
                 r = 0.0  # Invalid decision — R4 handles format penalty
