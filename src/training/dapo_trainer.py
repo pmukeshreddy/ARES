@@ -452,10 +452,11 @@ class DAPOTrainer:
                 r5_tensor = torch.tensor(logs["r5_raw"], dtype=torch.float32, device=self.device).view(-1, oversample_size)
                 
                 def normalize_within_group(t):
-                    """Dr.GRPO with Std Normalization: subtract mean and divide by std."""
+                    """Dr.GRPO with Std Normalization and zero-variance guard."""
                     m = t.mean(dim=1, keepdim=True)
-                    s = t.std(dim=1, keepdim=True) + 1e-8
-                    return (t - m) / s
+                    s = t.std(dim=1, keepdim=True)
+                    mask = s > 1e-6
+                    return torch.where(mask, (t - m) / (s + 1e-8), torch.zeros_like(t))
                 
                 adv_r1 = normalize_within_group(r1_tensor) * w_r1
                 adv_r2 = normalize_within_group(r2_tensor) * w_r2

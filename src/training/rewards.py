@@ -126,7 +126,7 @@ class DAPORewardScales:
         
         # Hyperparameters (Fix 1: Symmetric Penalties)
         alpha = self.config.get("r2_fp_alpha", 1.5)  # Revert from 3.0 to lessen harshness
-        beta = self.config.get("r2_fn_beta", 1.0)    # Increase from 0.5 to balance
+        beta = self.config.get("r2_fn_beta", 1.5)    # Increase to 1.5 to balance perfectly with alpha
         p = self.config.get("r2_reward_power", 0.5)
         q = self.config.get("r2_penalty_power", 1.0) # Down from 2.0 (Linear instead of convex)
         r_power = self.config.get("r2_fn_penalty_power", 1.0) # Up from 0.5 (Linear instead of concave)
