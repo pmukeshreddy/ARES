@@ -772,7 +772,11 @@ class DAPOTrainer:
                         item["prompt"] = generate_prompt(item["diff"], item["comment"], team_name)
                 
                 eval_size = min(100, len(eval_data))
-                eval_batch = random.sample(eval_data, eval_size)
+                # Use a specific Random instance so we get the exact same eval subset 
+                # every time without affecting the global random state for training.
+                import random as _random
+                eval_rng = _random.Random(42)
+                eval_batch = eval_rng.sample(eval_data, eval_size)
                 eval_prompts = [item["prompt"] for item in eval_batch]
                 eval_labels = [item["label"] for item in eval_batch]
                 
@@ -849,7 +853,8 @@ class DAPOTrainer:
                     best_cp.parent.mkdir(parents=True, exist_ok=True)
                     # Copy the SGLang LoRA sync dir — these are the EXACT weights that produced the eval
                     import shutil as _shutil
-                    sglang_lora_dir = f"{lora_sync_dir}_step{global_step - 1}"
+                    active_step_str = current_lora_name.split("_step")[-1]
+                    sglang_lora_dir = f"{lora_sync_dir}_step{active_step_str}"
                     if Path(sglang_lora_dir).exists():
                         if best_cp.exists():
                             _shutil.rmtree(best_cp)

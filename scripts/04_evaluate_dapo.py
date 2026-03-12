@@ -192,14 +192,17 @@ def evaluate_team(team_name: str, test_file: str, lora_path: str,
         logger.error(f"Test file not found: {test_file}")
         return None, None
     
+    import random
     dataset = []
     with open(test_file, "r") as f:
         for line in f:
             dataset.append(json.loads(line))
-    dataset = dataset[:max_samples]
-    
+            
     if not dataset:
         return None, None
+        
+    eval_rng = random.Random(42)
+    dataset = eval_rng.sample(dataset, min(max_samples, len(dataset)))
     
     # Regenerate prompts from current template (same as 03_train_dapo.py)
     from src.data.team_dataset import generate_prompt
