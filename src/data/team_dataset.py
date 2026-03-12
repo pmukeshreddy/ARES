@@ -182,7 +182,12 @@ def simulate_team_datasets(hf_dataset_path: str, output_dir: str, rm_model=None,
             # Use precomputed continuous RM score for meaningful team thresholds
             import hashlib
             example_id = data.get("example_id", hashlib.md5(f"{diff}_{comment}".encode('utf-8')).hexdigest())
-            rm_score = precomputed_scores.get(example_id, float(original_label))
+            
+            # CRITICAL FIX: Skip examples that haven't been scored by 00b_precompute_scores.py
+            if example_id not in precomputed_scores:
+                continue
+                
+            rm_score = precomputed_scores[example_id]
         else:
             # Fallback to original label if RM not provided
             rm_score = float(original_label)
