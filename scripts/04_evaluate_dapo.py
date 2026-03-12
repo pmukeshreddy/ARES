@@ -392,6 +392,11 @@ def main():
             lora_path = str(Path(lora_path).resolve())
             logger.info(f"Using {label} LoRA: {lora_path} on {data_label} data")
             
+            print(f"\n{'='*70}")
+            print(f"🚀 EVALUATING WITH CHECKPOINT:")
+            print(f"👉 {lora_path}")
+            print(f"{'='*70}\n")
+            
             max_tokens = dapo_config.get("max_new_tokens", 256)
             metrics, results = evaluate_team(
                 team_name, test_file, lora_path, tokenizer,
