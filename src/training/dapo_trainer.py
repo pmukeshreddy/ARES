@@ -512,9 +512,10 @@ class DAPOTrainer:
                 n_zero_var = 0
                 n_valid_round = 0
                 for g_idx in range(advantages.size(0)):
-                    g_std = advantages[g_idx].std().item()
+                    # Fix 2: Prevent Noise Amplification by checking the main reward (R2)
+                    g_r2_std = adv_r2[g_idx].std().item()
                     
-                    if g_std < 1e-5:
+                    if g_r2_std < 1e-5:
                         n_zero_var += 1
                         # Skip zero-variance groups entirely — no gradient signal
                         # Punishing confident-correct predictions was counterproductive
@@ -621,6 +622,7 @@ class DAPOTrainer:
                 
                 # Calculate logprobs using SFT reference adapter
                 with torch.no_grad():
+                    self.model.eval()
                     if "sft_ref" in self.model.peft_config:
                         self.model.set_adapter("sft_ref")
                         ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
@@ -628,6 +630,11 @@ class DAPOTrainer:
                     else:
                         with self.model.disable_adapter():
                             ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                            
+                    # Fix 1: Calculate old logprobs properly from the pre-updated model
+                    # Using eval() avoids dropout noise matching the current active model exactly
+                    old_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask).detach()
+                    self.model.train()
                     
                 # Single forward pass: get logits for both log_probs AND entropy
                 outputs = self.model(inputs.input_ids, attention_mask=inputs.attention_mask)
@@ -635,10 +642,6 @@ class DAPOTrainer:
                 labels = inputs.input_ids[:, 1:]
                 all_log_probs = F.log_softmax(logits, dim=-1)
                 curr_log_probs = torch.gather(all_log_probs, 2, labels.unsqueeze(2)).squeeze(2)
-                
-                # In PPO/GRPO, the old policy is the one that generated the rollouts.
-                # Since we do 1 epoch, it's just the current detached probabilities.
-                old_log_probs = curr_log_probs.detach()
                 
                 # Verify KL is sane:
                 with torch.no_grad():
