@@ -659,16 +659,15 @@ class DAPOTrainer:
                 self.model.train()
             
             loss_total_logging = 0.0
-            grad_accum_steps = self.config.get("grad_accum_steps", 4)
             ppo_epochs = self.config.get("ppo_epochs", 1)
             
-            if step % grad_accum_steps == 0:
-                optimizer.zero_grad()
-            
             # ── PPO EPOCH LOOP ─────────────────────────────────────────────────
-            # Epoch 0: ratio ≈ 1.0 (weights unchanged from rollout policy)
-            # Epoch 1+: weights have been updated, ratio diverges → clip activates
+            # Each PPO epoch does a full optimizer step over the cached rollouts.
+            # Epoch 0: ratio ≈ 1.0 (weights match rollout policy, same as before)
+            # Epoch 1+: weights updated → curr diverges from old → clip activates
+            # zero_grad is inside the loop so each epoch starts with clean gradients.
             for ppo_epoch in range(ppo_epochs):
+                optimizer.zero_grad()
                 for mb_cache_idx, (inputs, prompt_lens, ref_log_probs, old_log_probs) in enumerate(mb_cache):
                     mb_idx = mb_cache_idx * micro_batch_size  # Original flat index (for diag logging)
                     mb_adv = flat_advantages[mb_cache_idx*micro_batch_size : mb_cache_idx*micro_batch_size + micro_batch_size]
@@ -817,14 +816,14 @@ class DAPOTrainer:
                     
                     if mb_valid_tokens > 0:
                         mb_loss = mb_loss / mb_valid_tokens
-                        # Scale for accumulation across microbatches AND accumulation steps AND ppo_epochs
-                        (mb_loss / (num_microbatches * grad_accum_steps * ppo_epochs)).backward()
+                        # Scale by num_microbatches only — each PPO epoch is a self-contained
+                        # optimizer step, so no ppo_epochs or grad_accum_steps divisor here.
+                        (mb_loss / num_microbatches).backward()
                         loss_total_logging += mb_loss.item()
-
-            
-            # Only step every grad_accum_steps to average over more prompts
-            if (step + 1) % grad_accum_steps == 0 or step == max_steps - 1:
-                # Log grad norm before stepping
+                
+                # ── Optimizer step at the END of each PPO epoch ────────────────
+                # Weights update here, so the next epoch's curr_log_probs will
+                # diverge from old_log_probs and the DAPO clip will actually fire.
                 grads_norm = 0.0
                 n_frozen = 0
                 n_active = 0
@@ -836,11 +835,13 @@ class DAPOTrainer:
                         else:
                             n_frozen += 1
                 grads_norm = grads_norm ** 0.5
-                logger.info(f"  DEBUG Pre-Step: grad_norm={grads_norm:.4f}, active_lora_tensors={n_active}, frozen_lora_tensors={n_frozen}, accum={grad_accum_steps} batches")
-                
+                if ppo_epoch == ppo_epochs - 1:  # Only log on final epoch to reduce noise
+                    logger.info(f"  DEBUG Pre-Step [ppo_epoch={ppo_epoch}]: grad_norm={grads_norm:.4f}, active_lora_tensors={n_active}, frozen_lora_tensors={n_frozen}")
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 optimizer.step()
-                scheduler.step()
+            
+            # scheduler steps once per DAPO step (not per PPO epoch)
+            scheduler.step()
             
             loss_total = torch.tensor(loss_total_logging / num_microbatches)
             
