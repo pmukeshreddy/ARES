@@ -259,19 +259,29 @@ class DAPORewardScales:
         for text, dec in zip(completions, decisions):
             token_count = len(self.tokenizer.encode(text, add_special_tokens=False))
             
-            # Decision-aware thresholds
-            if dec == "FILTER":
-                threshold = int(0.55 * max_new_tokens)  # ~140 tokens — enough to write the <decision> tag
-            else:
-                threshold = int(0.8 * max_new_tokens)  # ~200 tokens
-                
+            # Base penalty applies to everything over 80% of max tokens
+            threshold = int(0.8 * max_new_tokens)
+            
             if token_count <= threshold:
-                rewards.append(0.0)
+                base_penalty = 0.0
             elif token_count >= max_new_tokens:
-                rewards.append(-1.0)
+                base_penalty = -1.0
             else:
-                penalty = -((token_count - threshold) / (max_new_tokens - threshold))
-                rewards.append(penalty)
+                base_penalty = -((token_count - threshold) / (max_new_tokens - threshold))
+                
+            # Additional structure penalty if it's a FILTER but still has excessive text
+            # A FILTER decision should ideally be much shorter than SURFACE
+            filter_brevity_threshold = int(0.55 * max_new_tokens)
+            if dec == "FILTER":
+                if token_count > filter_brevity_threshold:
+                    # Small extra penalty for an overly long FILTER
+                    brevity_penalty = -0.2 * ((token_count - filter_brevity_threshold) / (max_new_tokens - filter_brevity_threshold))
+                else:
+                    brevity_penalty = 0.0
+            else:
+                brevity_penalty = 0.0
+                
+            rewards.append(max(-1.0, base_penalty + brevity_penalty))
         return rewards
     
 
