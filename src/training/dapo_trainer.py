@@ -344,6 +344,10 @@ class DAPOTrainer:
         for step in tqdm(range(max_steps), desc=f"Team {team_name} Training"):
             
             # 1. Sync LoRA weights to SGLang every N steps (avoids deadlock + faster)
+            # IMPORTANT: capture the rollout adapter name BEFORE updating current_lora_name.
+            # old_log_probs must come from the policy that generated the rollouts (previous step),
+            # NOT from the current weights after gradient updates.
+            rollout_lora_name = current_lora_name  # The adapter SGLang used for the LAST rollout
             if step % lora_sync_interval == 0 or current_lora_name is None:
                 new_lora_name = f"{team_name}_step{step}"
                 if new_lora_name == current_lora_name:
@@ -648,10 +652,19 @@ class DAPOTrainer:
                     else:
                         with self.model.disable_adapter():
                             ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
-                            
-                    # Fix 1: Calculate old logprobs properly from the pre-updated model
-                    # Using eval() avoids dropout noise matching the current active model exactly
-                    old_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask).detach()
+
+                    # Compute old_log_probs from the ROLLOUT policy (the LoRA SGLang used to generate).
+                    # Previously this used the *current* weights, making ratio=exp(curr-old)≈1.0 always,
+                    # which meant the DAPO clip never fired (running pure unconstrained REINFORCE).
+                    # Now we switch to the rollout adapter to get the true importance-sampling ratio.
+                    rollout_adapter = rollout_lora_name  # Captured before sync above
+                    if rollout_adapter is not None and rollout_adapter in self.model.peft_config:
+                        self.model.set_adapter(rollout_adapter)
+                        old_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask).detach()
+                        self.model.set_adapter("default")
+                    else:
+                        # Step 0 / first step: no rollout adapter yet, fall back to current weights
+                        old_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask).detach()
                     self.model.train()
                     
                 # Single forward pass: get logits for both log_probs AND entropy
