@@ -513,21 +513,36 @@ class DAPOTrainer:
                 
                 # Accumulate valid groups
                 n_zero_var = 0
+                n_zero_var_penalized = 0
                 n_valid_round = 0
                 for g_idx in range(advantages.size(0)):
-                    # Fix 2: Prevent Noise Amplification by checking the main reward (R2)
-                    g_r2_std = adv_r2[g_idx].std().item()
+                    # Check zero-variance using RAW R2 rewards (before mean-subtraction)
+                    # so we can distinguish correct vs. wrong uniform groups.
+                    g_r2_raw_std = r2_tensor[g_idx].std().item()
+                    g_r2_raw_mean = r2_tensor[g_idx].mean().item()
                     
-                    if g_r2_std < 1e-5:
+                    if g_r2_raw_std < 1e-5:
                         n_zero_var += 1
-                        # Skip zero-variance groups entirely — no gradient signal
-                        # Punishing confident-correct predictions was counterproductive
                         if step % 5 == 0:
                             zv_label = flat_labels[g_idx * oversample_size]
                             zv_decisions = [parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]
                             zv_majority = max(set(zv_decisions), key=zv_decisions.count) if zv_decisions else None
-                            logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority={zv_majority} → SKIPPED")
-                        continue  # Don't add to accumulated buffers
+
+                        if g_r2_raw_mean >= 0:
+                            # Uniformly CORRECT (all right decisions with same reward).
+                            # No gradient signal needed — skip.
+                            if step % 5 == 0:
+                                logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority={zv_majority}, r2_mean={g_r2_raw_mean:.3f} → SKIPPED (correct)")
+                            continue
+                        else:
+                            # Uniformly WRONG (all same bad decision, e.g. all-SURFACE for label=0).
+                            # Don't silently drop — assign a constant negative advantage
+                            # so the model learns this entire pattern is bad.
+                            n_zero_var_penalized += 1
+                            constant_neg_adv = g_r2_raw_mean * w_r2  # Negative, scaled by weight
+                            group_advs = torch.full((oversample_size,), constant_neg_adv, dtype=torch.float32, device=self.device)
+                            if step % 5 == 0:
+                                logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority={zv_majority}, r2_mean={g_r2_raw_mean:.3f} → PENALIZED (wrong, adv={constant_neg_adv:.3f})")
                     else:
                         n_valid_round += 1
                         group_advs = advantages[g_idx]
@@ -539,7 +554,7 @@ class DAPOTrainer:
                         accumulated_advantages.append(group_advs[idx].item())
                 
                 if step % 5 == 0 and n_zero_var > 0:
-                    logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups skipped")
+                    logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups ({n_zero_var - n_zero_var_penalized} skipped correct, {n_zero_var_penalized} penalized wrong)")
                         
                 # 3. After advantage computation, before the zero-variance check - see what the model is actually working with:
                 if step % 5 == 0:
