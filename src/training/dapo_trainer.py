@@ -647,8 +647,22 @@ class DAPOTrainer:
                 with torch.no_grad():
                     kl_check = (curr_log_probs - ref_log_probs).mean().item()
                     ratio_check = torch.exp(curr_log_probs - ref_log_probs).mean().item()
+                    
                     if mb_idx == 0:
                         logger.info(f"  DEBUG KL: mean(curr-ref)={kl_check:.4f}, mean_ratio={ratio_check:.4f}")
+                        
+                        # Add deep diagnostics for KL
+                        logger.info(f"  DIAG-KL [Batch {mb_idx}]:")
+                        logger.info(f"    ref_log_probs shape: {ref_log_probs.shape}, mean: {ref_log_probs.mean().item():.4f}, std: {ref_log_probs.std().item():.4f}")
+                        logger.info(f"    curr_log_probs shape: {curr_log_probs.shape}, mean: {curr_log_probs.mean().item():.4f}, std: {curr_log_probs.std().item():.4f}")
+                        
+                        # Are they exactly identical tensors?
+                        identical_elements = (curr_log_probs == ref_log_probs).float().mean().item()
+                        logger.info(f"    Fraction of exactly identical logprobs (curr == ref): {identical_elements * 100:.2f}%")
+                        
+                        # Check adapter status
+                        active_adapters = getattr(self.model, "active_adapters", "Unknown")
+                        logger.info(f"    Active PEFT adapters during curr_log_probs pass: {active_adapters}")
                 
                 # Calculate ratio and clip per token
                 mb_loss = 0.0
@@ -756,6 +770,13 @@ class DAPOTrainer:
                     
                     # 5. Inside the per-token loss, log the actual loss components once per step:
                     if mb_idx == 0 and idx == 0:
+                        # DIAG: Check exactly masked elements
+                        kl_raw_mean = kl.mean().item()
+                        kl_masked_mean = masked_kl.item()
+                        
+                        logger.info(f"    DIAG-KL-MASK: Raw KL mean={kl_raw_mean:.6f}, Masked KL mean={kl_masked_mean:.6f}")
+                        logger.info(f"    DIAG-KL-MASK: KL penalty weight={kl_penalty_weight}")
+                        
                         logger.info(
                             f"  DEBUG Loss components: surr={weighted_surr.item():.4f}, "
                             f"kl={kl_penalty_weight * masked_kl.item():.4f}, "
