@@ -209,8 +209,8 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
                     valid_count += 1
                 else:
                     item["teacher_reasoning"] = False  # Track failed
-                    if total_processed == 0: # Print the very first failure for debugging
-                        logger.warning(f"DEBUG: 1st failed generation raw text:\n{failed_texts[0]}")
+                    if failed_texts: # Print reason for failure
+                        logger.warning(f"DEBUG: Failed generation ({expected_decision}):\n{failed_texts[0]}")
                     
                 total_processed += 1
                 
