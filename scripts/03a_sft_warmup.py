@@ -67,7 +67,7 @@ def create_sft_example(item: dict, tokenizer) -> str:
     
     # Format with chat template
     messages = [
-        {"role": "system", "content": "You are a helpful AI code reviewer."},
+        {"role": "system", "content": "You are a helpful AI code reviewer. Keep your reasoning inside <think> tags extremely concise (max 2 sentences) to ensure you can reach the final <decision> tag before the token limit."},
         {"role": "user", "content": prompt}
     ]
     prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -134,7 +134,7 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
             prompt_texts = []
             for item in batch_items:
                 messages = [
-                    {"role": "system", "content": "You are a helpful AI code reviewer."},
+                    {"role": "system", "content": "You are a helpful AI code reviewer. Provide extremely brief, content-specific reasoning inside <think> tags (max 2 sentences), then <score>, then <decision>SURFACE or FILTER. You MUST reach the <decision> tag quickly."},
                     {"role": "user", "content": item["prompt"]}
                 ]
                 prompt_texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
