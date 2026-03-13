@@ -41,7 +41,20 @@ def parse_completion(completion: str) -> dict:
         parsed["format_score"] = 1.0
     elif parts_found > 0:
         parsed["format_score"] = 0.5
+    else:
+        parsed["format_score"] = -1.0
         
+    # [DEBUG] If we failed to get a perfect format, log it once per run to debug
+    if parsed["format_score"] != 1.0:
+        if not hasattr(parse_completion, "has_logged_failure"):
+            logger.info("=== FORMAT PARSING FAILURE DEBUG ===")
+            logger.info(f"Raw completion text:\n{completion}")
+            logger.info(f"Extracted: Think: {'<FOUND>' if parsed['think'] else 'MISSING'}, "
+                        f"Score: {parsed['score'] if parsed['score'] is not None else 'MISSING'}, "
+                        f"Decision: {parsed['decision'] if parsed['decision'] else 'MISSING'}")
+            logger.info("====================================")
+            parse_completion.has_logged_failure = True
+            
     return parsed
 
 
