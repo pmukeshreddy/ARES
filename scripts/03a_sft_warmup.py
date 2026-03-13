@@ -67,7 +67,7 @@ def create_sft_example(item: dict, tokenizer) -> str:
     
     # Format with chat template
     messages = [
-        {"role": "system", "content": "You are a helpful AI code reviewer. Keep your reasoning inside <think> tags extremely concise. DO NOT quote the diff or comment. You have a strict 30-word limit before you must output your <decision>."},
+        {"role": "system", "content": "You are a helpful AI code reviewer. Keep your reasoning inside <reason> tags extremely concise. DO NOT quote the diff or comment. You have a strict 30-word limit before you must output your <decision>."},
         {"role": "user", "content": prompt}
     ]
     prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -138,7 +138,7 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
             prompt_texts = []
             for item in batch_items:
                 messages = [
-                    {"role": "system", "content": "You are a helpful AI code reviewer. Keep your reasoning inside <think> tags extremely concise. DO NOT quote the diff or comment. You have a strict 30-word limit before you must output your <score> and <decision>SURFACE/FILTER."},
+                    {"role": "system", "content": "You are a helpful AI code reviewer. Keep your reasoning inside <reason> tags extremely concise. DO NOT quote the diff or comment. You have a strict 30-word limit before you must output your <score> and <decision>SURFACE/FILTER."},
                     {"role": "user", "content": item["prompt"]}
                 ]
                 prompt_texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
@@ -185,8 +185,9 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
                         continue
                     
                     # Extract reasoning
-                    think_match = re.search(r'<think>(.*?)</think>', gen_text, re.DOTALL)
+                    think_match = re.search(r'<(?:think|reason|reasoning)>(.*?)</(?:think|reason|reasoning)>', gen_text, re.DOTALL | re.IGNORECASE)
                     if not think_match:
+                        failed_texts.append(gen_text)
                         continue
                     reasoning = think_match.group(1).strip()
                     
