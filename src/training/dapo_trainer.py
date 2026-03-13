@@ -625,203 +625,202 @@ class DAPOTrainer:
             micro_batch_size = 2
             num_microbatches = (len(flat_prompts) + micro_batch_size - 1) // micro_batch_size
             
-            loss_total_logging = 0.0
-            grad_accum_steps = self.config.get("grad_accum_steps", 4)
-            if step % grad_accum_steps == 0:
-                optimizer.zero_grad()
-            
-            for mb_idx in range(0, len(flat_prompts), micro_batch_size):
-                mb_full_texts = full_texts[mb_idx:mb_idx+micro_batch_size]
-                mb_prompts = flat_prompts[mb_idx:mb_idx+micro_batch_size]
-                mb_adv = flat_advantages[mb_idx:mb_idx+micro_batch_size]
-                
-                inputs = self.tokenizer(mb_full_texts, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(self.device)
-                prompt_inputs = self.tokenizer(mb_prompts, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(self.device)
-                
-                # Mask out prompt tokens so loss is only on generated tokens
-                # The sum of mask gives the exact index where generation starts (since it's 0-indexed)
-                prompt_lens = prompt_inputs.attention_mask.sum(dim=1)
-                
-                # Calculate logprobs using SFT reference adapter
-                with torch.no_grad():
-                    self.model.eval()
+            # ── PRE-COMPUTE old_log_probs + ref_log_probs ONCE ─────────────────
+            # old_log_probs must be frozen before ANY gradient update this step.
+            # Computing it inside the PPO epoch loop would use post-update weights
+            # in epochs 1+, making ratio≈1 again. By freezing it here, ratio can
+            # genuinely diverge across epochs so the DAPO clip actually fires.
+            #
+            # Similarly, ref_log_probs never needs recomputation (frozen SFT ref).
+            mb_cache = []  # List of (inputs, prompt_lens, ref_lp, old_lp) per micro-batch
+            with torch.no_grad():
+                self.model.eval()
+                for mb_idx in range(0, len(flat_prompts), micro_batch_size):
+                    mb_full_texts = full_texts[mb_idx:mb_idx+micro_batch_size]
+                    mb_prompts_pre = flat_prompts[mb_idx:mb_idx+micro_batch_size]
+                    
+                    inputs_pre = self.tokenizer(mb_full_texts, padding=True, truncation=True, max_length=1536, return_tensors="pt").to(self.device)
+                    prompt_inputs_pre = self.tokenizer(mb_prompts_pre, padding=True, truncation=True, max_length=1024, return_tensors="pt").to(self.device)
+                    prompt_lens_pre = prompt_inputs_pre.attention_mask.sum(dim=1)
+                    
+                    # ref_log_probs: frozen SFT reference (never changes)
                     if "sft_ref" in self.model.peft_config:
                         self.model.set_adapter("sft_ref")
-                        ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                        ref_lp = self._get_logprobs(self.model, inputs_pre.input_ids, inputs_pre.attention_mask)
                         self.model.set_adapter("default")
                     else:
                         with self.model.disable_adapter():
-                            ref_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask)
+                            ref_lp = self._get_logprobs(self.model, inputs_pre.input_ids, inputs_pre.attention_mask)
+                    
+                    # old_log_probs: current policy BEFORE any updates this step
+                    old_lp = self._get_logprobs(self.model, inputs_pre.input_ids, inputs_pre.attention_mask).detach()
+                    
+                    mb_cache.append((inputs_pre, prompt_lens_pre, ref_lp.detach(), old_lp))
+                self.model.train()
+            
+            loss_total_logging = 0.0
+            grad_accum_steps = self.config.get("grad_accum_steps", 4)
+            ppo_epochs = self.config.get("ppo_epochs", 1)
+            
+            if step % grad_accum_steps == 0:
+                optimizer.zero_grad()
+            
+            # ── PPO EPOCH LOOP ─────────────────────────────────────────────────
+            # Epoch 0: ratio ≈ 1.0 (weights unchanged from rollout policy)
+            # Epoch 1+: weights have been updated, ratio diverges → clip activates
+            for ppo_epoch in range(ppo_epochs):
+                for mb_cache_idx, (inputs, prompt_lens, ref_log_probs, old_log_probs) in enumerate(mb_cache):
+                    mb_idx = mb_cache_idx * micro_batch_size  # Original flat index (for diag logging)
+                    mb_adv = flat_advantages[mb_cache_idx*micro_batch_size : mb_cache_idx*micro_batch_size + micro_batch_size]
+                    
+                    # Single forward pass: get logits for both log_probs AND entropy
+                    outputs = self.model(inputs.input_ids, attention_mask=inputs.attention_mask)
+                    logits = outputs.logits[:, :-1, :]  # shift for next-token prediction
+                    labels = inputs.input_ids[:, 1:]
+                    all_log_probs = F.log_softmax(logits, dim=-1)
+                    curr_log_probs = torch.gather(all_log_probs, 2, labels.unsqueeze(2)).squeeze(2)
+                    
+                    # Verify KL is sane (log once per step on first epoch):
+                    if ppo_epoch == 0:
+                        with torch.no_grad():
+                            kl_check = (curr_log_probs - ref_log_probs).mean().item()
+                            ratio_check = torch.exp(curr_log_probs - ref_log_probs).mean().item()
+                            
+                            if mb_idx == 0:
+                                logger.info(f"  DEBUG KL: mean(curr-ref)={kl_check:.4f}, mean_ratio={ratio_check:.4f}")
+                                logger.info(f"  DIAG-KL [Batch {mb_idx}]:")
+                                logger.info(f"    ref_log_probs shape: {ref_log_probs.shape}, mean: {ref_log_probs.mean().item():.4f}, std: {ref_log_probs.std().item():.4f}")
+                                logger.info(f"    curr_log_probs shape: {curr_log_probs.shape}, mean: {curr_log_probs.mean().item():.4f}, std: {curr_log_probs.std().item():.4f}")
+                                identical_elements = (curr_log_probs == ref_log_probs).float().mean().item()
+                                logger.info(f"    Fraction of exactly identical logprobs (curr == ref): {identical_elements * 100:.2f}%")
+                                active_adapters = getattr(self.model, "active_adapters", "Unknown")
+                                logger.info(f"    Active PEFT adapters during curr_log_probs pass: {active_adapters}")
+                    
+                    # Calculate ratio and clip per token
+                    mb_loss = 0.0
+                    mb_valid_tokens = 0
+                    kl_penalty_weight = self.config.get("kl_penalty", 0.05)
+                    entropy_bonus_weight = self.config.get("entropy_bonus", 0.03)
+                    
+                    for idx in range(len(mb_adv)):
+                        start_idx = prompt_lens[idx]
+                        end_idx = inputs.attention_mask[idx].sum() - 1
+                        
+                        if start_idx >= end_idx:
+                            continue 
+                            
+                        curr_logp = curr_log_probs[idx, start_idx:end_idx]
+                        old_logp = old_log_probs[idx, start_idx:end_idx]
+                        ref_logp = ref_log_probs[idx, start_idx:end_idx]
+                        
+                        ratio = torch.exp(curr_logp - old_logp)
+                        adv = mb_adv[idx]
+                        
+                        surr1 = ratio * adv
+                        
+                        # DAPO Asymmetric Decoupled Clipping
+                        ratio_clipped = torch.where(
+                            adv > 0,
+                            torch.clamp(ratio, max=1.0 + self.clip_ratio_high),
+                            torch.clamp(ratio, min=1.0 - self.clip_ratio_low)
+                        )
+                        surr2 = ratio_clipped * adv
+                        
+                        # KL divergence estimator (standard PPO approximation: log(π_theta/π_ref))
+                        kl = curr_logp - ref_logp
+                        
+                        # Token-level entropy of the policy's distribution
+                        # H(π) = -Σ p(token) * log(p(token)) at each generated position
+                        gen_logits = logits[idx, start_idx:end_idx, :]
+                        gen_probs = F.softmax(gen_logits, dim=-1)
+                        gen_log_probs = F.log_softmax(gen_logits, dim=-1)
+                        token_entropy = -(gen_probs * gen_log_probs).sum(dim=-1)  # H per position
+                        
+                        # HIGH-ENTROPY TOKEN MASK: Keep top 80% of tokens
+                        # while dropping the 20% most certain (lowest entropy) boilerplate tokens.
+                        rho_keep = 0.8
+                        n_tokens = token_entropy.size(0)
+                        k = max(1, int(n_tokens * rho_keep))
+                        entropy_threshold = torch.topk(token_entropy, k).values[-1]
+                        entropy_mask = (token_entropy >= entropy_threshold).float()
+                        
+                        # ── Detect decision token region (used for mask exemption + boost) ──
+                        decision_boost = self.config.get("decision_token_boost", 5.0)
+                        token_weight = torch.ones_like(token_entropy)
+                        gen_token_ids = inputs.input_ids[idx, start_idx+1:end_idx+1]
+                        gen_tokens_list = self.tokenizer.convert_ids_to_tokens(gen_token_ids.tolist())
+                        gen_text = self.tokenizer.decode(gen_token_ids.tolist())
+                        dec_start_char = gen_text.find('<decision>')
+                        dec_end_char = gen_text.find('</decision>')
+                        
+                        n_exempted = 0
+                        if dec_start_char >= 0 and dec_end_char >= 0:
+                            dec_end_char += len('</decision>')
+                            chars_so_far = 0
+                            for t_i, tok in enumerate(gen_tokens_list):
+                                if t_i >= len(token_weight):
+                                    break
+                                
+                                # Safely convert to string, handling Qwen tokenizer bytes/strings
+                                if isinstance(tok, bytes):
+                                    tok_text = tok.decode('utf-8', errors='replace')
+                                else:
+                                    tok_text = self.tokenizer.convert_tokens_to_string([tok])
+                                    
+                                tok_start = chars_so_far
+                                tok_end = chars_so_far + len(tok_text)
+                                
+                                # INTERSECTION check rather than strict bounds check
+                                if tok_start < dec_end_char and tok_end > dec_start_char:
+                                    token_weight[t_i] = decision_boost
+                                    entropy_mask[t_i] = 1.0  # Exempt from masking!
+                                    n_exempted += 1
+                                    
+                                chars_so_far = tok_end
+                        
+                        # ── DIAG-4/6: Decision token diagnostics ──────────
+                        if step % 5 == 0 and ppo_epoch == 0 and mb_cache_idx == 0 and idx == 0:
+                            n_boosted = (token_weight > 1.0).sum().item()
+                            logger.info(
+                                f"  DIAG-4/6 Decision tokens: {n_boosted} boosted {decision_boost}x, "
+                                f"{n_exempted} exempted from entropy mask, "
+                                f"threshold={entropy_threshold.item():.3f}, seq_mean_entropy={token_entropy.mean().item():.3f}"
+                            )
+                        
+                        # Apply mask and token weight to surrogate loss
+                        surr_min = torch.min(surr1, surr2)
+                        weighted_surr = -(surr_min * entropy_mask * token_weight).sum() / max(1.0, (entropy_mask * token_weight).sum())
+                        
+                        # KL and entropy bonus only on masked tokens (no boost needed)
+                        masked_kl = (kl * entropy_mask).sum() / max(1.0, entropy_mask.sum())
+                        masked_entropy = (token_entropy * entropy_mask).sum() / max(1.0, entropy_mask.sum())
+                        
+                        token_loss = weighted_surr + kl_penalty_weight * masked_kl - entropy_bonus_weight * masked_entropy
+                        mb_loss += token_loss
+                        mb_valid_tokens += 1
+                        
+                        # Log loss components once per step (first epoch, first micro-batch, first seq)
+                        if ppo_epoch == 0 and mb_cache_idx == 0 and idx == 0:
+                            kl_raw_mean = kl.mean().item()
+                            kl_masked_mean = masked_kl.item()
+                            logger.info(f"    DIAG-KL-MASK: Raw KL mean={kl_raw_mean:.6f}, Masked KL mean={kl_masked_mean:.6f}")
+                            logger.info(f"    DIAG-KL-MASK: KL penalty weight={kl_penalty_weight}")
+                            logger.info(
+                                f"  DEBUG Loss components: surr={weighted_surr.item():.4f}, "
+                                f"kl={kl_penalty_weight * masked_kl.item():.4f}, "
+                                f"entropy={entropy_bonus_weight * masked_entropy.item():.4f}, "
+                                f"total={token_loss.item():.4f}, "
+                                f"mean_ratio={ratio.mean().item():.4f}, "
+                                f"clipped_frac={((ratio > 1.0 + self.clip_ratio_high) | (ratio < 1.0 - self.clip_ratio_low)).float().mean().item():.2f}, "
+                                f"ppo_epoch={ppo_epoch}"
+                            )
+                    
+                    if mb_valid_tokens > 0:
+                        mb_loss = mb_loss / mb_valid_tokens
+                        # Scale for accumulation across microbatches AND accumulation steps AND ppo_epochs
+                        (mb_loss / (num_microbatches * grad_accum_steps * ppo_epochs)).backward()
+                        loss_total_logging += mb_loss.item()
 
-                    # Compute old_log_probs from the ROLLOUT policy (the LoRA SGLang used to generate).
-                    # Previously this used the *current* weights, making ratio=exp(curr-old)≈1.0 always,
-                    # which meant the DAPO clip never fired (running pure unconstrained REINFORCE).
-                    # Now we switch to the rollout adapter to get the true importance-sampling ratio.
-                    rollout_adapter = rollout_lora_name  # Captured before sync above
-                    if rollout_adapter is not None and rollout_adapter in self.model.peft_config:
-                        self.model.set_adapter(rollout_adapter)
-                        old_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask).detach()
-                        self.model.set_adapter("default")
-                    else:
-                        # Step 0 / first step: no rollout adapter yet, fall back to current weights
-                        old_log_probs = self._get_logprobs(self.model, inputs.input_ids, inputs.attention_mask).detach()
-                    self.model.train()
-                    
-                # Single forward pass: get logits for both log_probs AND entropy
-                outputs = self.model(inputs.input_ids, attention_mask=inputs.attention_mask)
-                logits = outputs.logits[:, :-1, :]  # shift for next-token prediction
-                labels = inputs.input_ids[:, 1:]
-                all_log_probs = F.log_softmax(logits, dim=-1)
-                curr_log_probs = torch.gather(all_log_probs, 2, labels.unsqueeze(2)).squeeze(2)
-                
-                # Verify KL is sane:
-                with torch.no_grad():
-                    kl_check = (curr_log_probs - ref_log_probs).mean().item()
-                    ratio_check = torch.exp(curr_log_probs - ref_log_probs).mean().item()
-                    
-                    if mb_idx == 0:
-                        logger.info(f"  DEBUG KL: mean(curr-ref)={kl_check:.4f}, mean_ratio={ratio_check:.4f}")
-                        
-                        # Add deep diagnostics for KL
-                        logger.info(f"  DIAG-KL [Batch {mb_idx}]:")
-                        logger.info(f"    ref_log_probs shape: {ref_log_probs.shape}, mean: {ref_log_probs.mean().item():.4f}, std: {ref_log_probs.std().item():.4f}")
-                        logger.info(f"    curr_log_probs shape: {curr_log_probs.shape}, mean: {curr_log_probs.mean().item():.4f}, std: {curr_log_probs.std().item():.4f}")
-                        
-                        # Are they exactly identical tensors?
-                        identical_elements = (curr_log_probs == ref_log_probs).float().mean().item()
-                        logger.info(f"    Fraction of exactly identical logprobs (curr == ref): {identical_elements * 100:.2f}%")
-                        
-                        # Check adapter status
-                        active_adapters = getattr(self.model, "active_adapters", "Unknown")
-                        logger.info(f"    Active PEFT adapters during curr_log_probs pass: {active_adapters}")
-                
-                # Calculate ratio and clip per token
-                mb_loss = 0.0
-                mb_valid_tokens = 0
-                kl_penalty_weight = self.config.get("kl_penalty", 0.10)
-                entropy_bonus_weight = self.config.get("entropy_bonus", 0.03)
-                
-                for idx in range(len(mb_adv)):
-                    start_idx = prompt_lens[idx]
-                    end_idx = inputs.attention_mask[idx].sum() - 1
-                    
-                    if start_idx >= end_idx:
-                        continue 
-                        
-                    curr_logp = curr_log_probs[idx, start_idx:end_idx]
-                    old_logp = old_log_probs[idx, start_idx:end_idx]
-                    ref_logp = ref_log_probs[idx, start_idx:end_idx]
-                    
-                    ratio = torch.exp(curr_logp - old_logp)
-                    adv = mb_adv[idx]
-                    
-                    surr1 = ratio * adv
-                    
-                    # DAPO Asymmetric Decoupled Clipping
-                    ratio_clipped = torch.where(
-                        adv > 0,
-                        torch.clamp(ratio, max=1.0 + self.clip_ratio_high),
-                        torch.clamp(ratio, min=1.0 - self.clip_ratio_low)
-                    )
-                    surr2 = ratio_clipped * adv
-                    
-                    # KL divergence estimator (standard PPO approximation: log(π_theta/π_ref))
-                    kl = curr_logp - ref_logp
-                    
-                    # Token-level entropy of the policy's distribution
-                    # H(π) = -Σ p(token) * log(p(token)) at each generated position
-                    gen_logits = logits[idx, start_idx:end_idx, :]
-                    gen_probs = F.softmax(gen_logits, dim=-1)
-                    gen_log_probs = F.log_softmax(gen_logits, dim=-1)
-                    token_entropy = -(gen_probs * gen_log_probs).sum(dim=-1)  # H per position
-                    
-                    # HIGH-ENTROPY TOKEN MASK: Keep top 80% of tokens
-                    # while dropping the 20% most certain (lowest entropy) boilerplate tokens.
-                    rho_keep = 0.8
-                    n_tokens = token_entropy.size(0)
-                    k = max(1, int(n_tokens * rho_keep))
-                    entropy_threshold = torch.topk(token_entropy, k).values[-1]
-                    entropy_mask = (token_entropy >= entropy_threshold).float()
-                    
-                    # ── Detect decision token region (used for mask exemption + boost) ──
-                    decision_boost = self.config.get("decision_token_boost", 5.0)
-                    token_weight = torch.ones_like(token_entropy)
-                    gen_token_ids = inputs.input_ids[idx, start_idx+1:end_idx+1]
-                    gen_tokens_list = self.tokenizer.convert_ids_to_tokens(gen_token_ids.tolist())
-                    gen_text = self.tokenizer.decode(gen_token_ids.tolist())
-                    dec_start_char = gen_text.find('<decision>')
-                    dec_end_char = gen_text.find('</decision>')
-                    
-                    n_exempted = 0
-                    if dec_start_char >= 0 and dec_end_char >= 0:
-                        dec_end_char += len('</decision>')
-                        chars_so_far = 0
-                        for t_i, tok in enumerate(gen_tokens_list):
-                            if t_i >= len(token_weight):
-                                break
-                            
-                            # Safely convert to string, handling Qwen tokenizer bytes/strings
-                            if isinstance(tok, bytes):
-                                tok_text = tok.decode('utf-8', errors='replace')
-                            else:
-                                tok_text = self.tokenizer.convert_tokens_to_string([tok])
-                                
-                            tok_start = chars_so_far
-                            tok_end = chars_so_far + len(tok_text)
-                            
-                            # INTERSECTION check rather than strict bounds check
-                            # This fixes the bug where token boundaries don't perfectly align with char boundaries
-                            if tok_start < dec_end_char and tok_end > dec_start_char:
-                                token_weight[t_i] = decision_boost
-                                entropy_mask[t_i] = 1.0  # Exempt from masking!
-                                n_exempted += 1
-                                
-                            chars_so_far = tok_end
-                    
-                    # ── DIAG-4/6: Decision token diagnostics ──────────
-                    if step % 5 == 0 and mb_idx == 0 and idx == 0:
-                        n_boosted = (token_weight > 1.0).sum().item()
-                        logger.info(
-                            f"  DIAG-4/6 Decision tokens: {n_boosted} boosted {decision_boost}x, "
-                            f"{n_exempted} exempted from entropy mask, "
-                            f"threshold={entropy_threshold.item():.3f}, seq_mean_entropy={token_entropy.mean().item():.3f}"
-                        )
-                    
-                    # Apply mask and token weight to surrogate loss
-                    surr_min = torch.min(surr1, surr2)
-                    weighted_surr = -(surr_min * entropy_mask * token_weight).sum() / max(1.0, (entropy_mask * token_weight).sum())
-                    
-                    # KL and entropy bonus only on masked tokens (no boost needed)
-                    masked_kl = (kl * entropy_mask).sum() / max(1.0, entropy_mask.sum())
-                    masked_entropy = (token_entropy * entropy_mask).sum() / max(1.0, entropy_mask.sum())
-                    
-                    token_loss = weighted_surr + kl_penalty_weight * masked_kl - entropy_bonus_weight * masked_entropy
-                    mb_loss += token_loss
-                    mb_valid_tokens += 1
-                    
-                    # 5. Inside the per-token loss, log the actual loss components once per step:
-                    if mb_idx == 0 and idx == 0:
-                        # DIAG: Check exactly masked elements
-                        kl_raw_mean = kl.mean().item()
-                        kl_masked_mean = masked_kl.item()
-                        
-                        logger.info(f"    DIAG-KL-MASK: Raw KL mean={kl_raw_mean:.6f}, Masked KL mean={kl_masked_mean:.6f}")
-                        logger.info(f"    DIAG-KL-MASK: KL penalty weight={kl_penalty_weight}")
-                        
-                        logger.info(
-                            f"  DEBUG Loss components: surr={weighted_surr.item():.4f}, "
-                            f"kl={kl_penalty_weight * masked_kl.item():.4f}, "
-                            f"entropy={entropy_bonus_weight * masked_entropy.item():.4f}, "
-                            f"total={token_loss.item():.4f}, "
-                            f"mean_ratio={ratio.mean().item():.4f}, "
-                            f"clipped_frac={(( ratio > 1.0 + self.clip_ratio_high) | (ratio < 1.0 - self.clip_ratio_low)).float().mean().item():.2f}"
-                        )
-                
-                if mb_valid_tokens > 0:
-                    mb_loss = mb_loss / mb_valid_tokens
-                    # Scale for accumulation across microbatches AND accumulation steps
-                    (mb_loss / (num_microbatches * grad_accum_steps)).backward()
-                    loss_total_logging += mb_loss.item()
             
             # Only step every grad_accum_steps to average over more prompts
             if (step + 1) % grad_accum_steps == 0 or step == max_steps - 1:
