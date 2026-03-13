@@ -19,13 +19,14 @@ def parse_completion(completion: str) -> dict:
         parsed["think"] = think_match.group(1).strip()
     else:
         # Fallback: SFT model might not output literal <think> tags.
-        # Grab everything before the <score> tag as the reasoning block.
-        score_start = completion.find("<score>")
-        if score_start == -1:
-            score_start = completion.find("<scores>")
+        # Use regex to safely grab everything before the <score> tag, handling newlines.
+        fallback_match = re.search(r'^(.*?)\s*<scores?>', completion, re.DOTALL)
+        if fallback_match:
+            parsed["think"] = fallback_match.group(1).strip()
             
-        if score_start > 0:
-            parsed["think"] = completion[:score_start].strip()
+    # If the fallback still left "think" empty (e.g., immediate score), it stays None
+    if parsed["think"] == "":
+        parsed["think"] = None
         
     # Extract score (also match <scores> which the model sometimes generates)
     score_match = re.search(r'<scores?>(.*?)</scores?>', completion, re.DOTALL)
