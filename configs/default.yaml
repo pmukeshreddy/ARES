@@ -110,7 +110,7 @@ dapo:
   token_level_loss: true
   kl_penalty: 1.0    # Fix 1: 20× increase — KL was 200× weaker than surrogate, ref anchor was dead
   ppo_epochs: 1      # Single-pass (set to 3 to enable multi-epoch PPO clipping)
-  entropy_bonus: 0.01    # Token-level entropy bonus to prevent policy collapse
+  entropy_bonus: 0.05    # Fix 4: was 0.01 (invisible at 0.006 vs surrogate 1.4); now ~0.03 — resists mode collapse
   temperature: 0.8       # Generation temperature (was 1.0, lowered to reduce invalid format)
   decision_token_boost: 5.0  # Boost gradient on <decision> tokens to fix reward dilution
   max_new_tokens: 256

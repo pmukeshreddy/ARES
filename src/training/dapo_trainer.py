@@ -296,6 +296,12 @@ class DAPOTrainer:
         best_checkpoint_path = None
         total_steps = max_steps
         
+        # Fix 3: Rolling format-rate tracker for collapse recovery
+        format_rate_history = []  # Stores valid_format_ratio per step
+        FORMAT_COLLAPSE_THRESHOLD = 0.50   # Below this is "collapsed"
+        FORMAT_COLLAPSE_WINDOW = 3         # Consecutive steps before rollback fires
+        rollback_count = 0                 # How many times we've rolled back
+        
         self.model.train()
         
         import random
@@ -586,14 +592,18 @@ class DAPOTrainer:
 
                     for idx in range(oversample_size):
                         flat_idx = g_idx * oversample_size + idx
-                        # Fix 2: Collect all sequences for capping.
                         seq_decision = zv_decisions[idx]
                         is_none = seq_decision is None
                         
                         step_raw_buffer.append({
                             "prompt": flat_prompts[flat_idx],
                             "completion": flat_completions[flat_idx],
-                            "advantage": -1.0 if is_none else group_advs[idx].item(),
+                            # Fix 1: Format is a hard gate — invalid format gets advantage=0.0
+                            # (not -1.0). The -1.0 was mixing into normalization and creating
+                            # an "suppress everything" gradient when most sequences were invalid.
+                            # 0.0 means no gradient signal at all from bad-format sequences;
+                            # they are excluded from the loss computation entirely below.
+                            "advantage": 0.0 if is_none else group_advs[idx].item(),
                             "decision": seq_decision
                         })
                 
@@ -644,9 +654,16 @@ class DAPOTrainer:
                 logger.warning(f"  Step {step}: no valid sequences after capping, skipping.")
                 continue
             
-            flat_prompts = [e["prompt"] for e in final_buffer]
-            flat_completions = [e["completion"] for e in final_buffer]
-            flat_advantages = torch.tensor([e["advantage"] for e in final_buffer], dtype=torch.float32, device=self.device)
+            # Fix 1: Exclude zero-advantage (format-invalid) sequences from loss computation.
+            # They're included above for capping accounting but produce no gradient, so skip them.
+            loss_buffer = [e for e in final_buffer if e["decision"] is not None]
+            if len(loss_buffer) == 0:
+                logger.warning(f"  Step {step}: all sequences are format-invalid, skipping loss.")
+                continue
+            
+            flat_prompts = [e["prompt"] for e in loss_buffer]
+            flat_completions = [e["completion"] for e in loss_buffer]
+            raw_advantages = torch.tensor([e["advantage"] for e in loss_buffer], dtype=torch.float32, device=self.device)
             
             # Compute S:F ratio & Address Rate for this step
             sf_ratio = n_surface_pred / max(1, n_filter_pred)
@@ -656,19 +673,18 @@ class DAPOTrainer:
             
             address_rate = (true_positives / max(1, (true_positives + false_positives))) * 100
             
-            # Soft normalization: scale to unit std without subtracting mean.
-            # This preserves GDPO per-component weighting while keeping advantage
-            # magnitudes large enough to produce meaningful gradients.
-            adv_std = flat_advantages.std() + 1e-8
-            # Floor at 0.5: when all groups are unanimously zero-var (e.g. all-None or all-wrong),
-            # raw std can be ~0.03. Dividing by that amplifies mean from -0.8 to -25, producing
-            # surr=26 and grad_norm=109 that nukes format in a single step.
-            # With floor=0.5, when real variance exists (std>0.5) normalization works normally;
-            # when everything is unanimous, advantages stay at natural ~0.5-1.0 scale.
-            adv_std_floored = max(adv_std.item(), 0.5)
+            # Fix 2: Mean-center before normalizing.
+            # Without centering, mean was consistently -0.8 to -1.0, so after dividing by std
+            # ~85% of sequences had negative advantage → "decrease everything" gradient.
+            # Subtracting mean first ensures ~50% positive, ~50% negative — proper "do A not B" signal.
+            raw_advantages = raw_advantages - raw_advantages.mean()
+            adv_std = raw_advantages.std() + 1e-8
+            # Fix 5: Raise std floor to 1.0 (was 0.5). Now that mean-centering removes the dangerous
+            # negative mean, 1.0 gives extra insurance against amplification without harmful side effects.
+            adv_std_floored = max(adv_std.item(), 1.0)
             if step % 5 == 0:
-                logger.info(f"  DIAG-5 Advantage std={adv_std.item():.4f} (floored to {adv_std_floored:.2f}), normalizing")
-            flat_advantages = flat_advantages / adv_std_floored
+                logger.info(f"  DIAG-5 Advantage std={adv_std.item():.4f} (floored to {adv_std_floored:.2f}) after mean-centering")
+            flat_advantages = raw_advantages / adv_std_floored
             
             # 4. After group normalization, before the loss loop - see final advantage distribution:
             logger.info(
@@ -922,6 +938,57 @@ class DAPOTrainer:
                     f"R2(Match): {logs['r2']:.2f} | "
                     f"Total R: {logs['total_reward']:.2f} | Format: {logs['valid_format_ratio']*100:.0f}%"
                 )
+            
+            # Fix 3: Format collapse recovery — rollback to best checkpoint if format dies.
+            # Track format rate in a rolling window; if below threshold for WINDOW steps, reload.
+            format_rate_history.append(logs['valid_format_ratio'])
+            if len(format_rate_history) > FORMAT_COLLAPSE_WINDOW:
+                format_rate_history.pop(0)
+            
+            if (
+                len(format_rate_history) == FORMAT_COLLAPSE_WINDOW
+                and all(r < FORMAT_COLLAPSE_THRESHOLD for r in format_rate_history)
+            ):
+                rollback_count += 1
+                logger.warning(
+                    f"  [ROLLBACK #{rollback_count}] Format rate {[f'{r*100:.0f}%' for r in format_rate_history]} "
+                    f"below {FORMAT_COLLAPSE_THRESHOLD*100:.0f}% for {FORMAT_COLLAPSE_WINDOW} steps. "
+                    f"Reloading checkpoint."
+                )
+                
+                # Pick the rollback target: best eval checkpoint > SFT warmup
+                rollback_path = None
+                if best_checkpoint_path and Path(best_checkpoint_path).exists():
+                    rollback_path = str(best_checkpoint_path)
+                    logger.warning(f"    → Rolling back to best checkpoint: {rollback_path}")
+                else:
+                    sft_fallback = Path("checkpoints/sft_warmup") / f"sft_warmup_{team_name}"
+                    if sft_fallback.exists():
+                        rollback_path = str(sft_fallback)
+                        logger.warning(f"    → No best checkpoint, rolling back to SFT warmup: {rollback_path}")
+                
+                if rollback_path:
+                    import safetensors.torch as st
+                    sft_state = st.load_file(str(Path(rollback_path) / "adapter_model.safetensors"))
+                    model_state = self.model.state_dict()
+                    matched = 0
+                    for k, v in sft_state.items():
+                        remapped = k.replace("lora_A.weight", "lora_A.default.weight").replace("lora_B.weight", "lora_B.default.weight")
+                        if remapped in model_state:
+                            model_state[remapped].copy_(v)
+                            matched += 1
+                    logger.warning(f"    → Restored {matched} LoRA tensors from checkpoint.")
+                    
+                    # Halve the learning rate
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = pg['lr'] / 2.0
+                    new_lr = optimizer.param_groups[0]['lr']
+                    logger.warning(f"    → LR halved to {new_lr:.2e}")
+                else:
+                    logger.warning("    → No rollback target found; continuing without rollback.")
+                
+                # Reset format history so we don't fire again immediately
+                format_rate_history.clear()
             
             # ── Mid-Training Evaluation ──────────────────────────
             eval_at_steps = self.config.get("eval_at_steps", [15, 30])
