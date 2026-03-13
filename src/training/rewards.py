@@ -18,13 +18,23 @@ def parse_completion(completion: str) -> dict:
     if think_match:
         parsed["think"] = think_match.group(1).strip()
     else:
-        # Fallback: SFT model might not output literal <think> tags.
-        # Use regex to safely grab everything before the <score> tag, handling newlines.
-        fallback_match = re.search(r'^(.*?)\s*<scores?>', completion, re.DOTALL)
-        if fallback_match:
-            parsed["think"] = fallback_match.group(1).strip()
-            
-    # If the fallback still left "think" empty (e.g., immediate score), it stays None
+        # Fallback A: Model outputs text BEFORE <score> (normal order)
+        pre_score_match = re.search(r'^(.*?)\s*<scores?>', completion, re.DOTALL)
+        if pre_score_match:
+            candidate = pre_score_match.group(1).strip()
+            if candidate:
+                parsed["think"] = candidate
+
+        # Fallback B: Model outputs <score>/<decision> FIRST, then reasoning after (inverted order)
+        # This is what the SFT-finetuned model currently does
+        if not parsed["think"]:
+            post_decision_match = re.search(r'</decisions?>\s*(.+)', completion, re.DOTALL | re.IGNORECASE)
+            if post_decision_match:
+                candidate = post_decision_match.group(1).strip()
+                if candidate:
+                    parsed["think"] = candidate
+                    
+    # If still empty, mark as None
     if parsed["think"] == "":
         parsed["think"] = None
         
