@@ -169,6 +169,8 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
                 comment_words = set(item.get("comment", "")[:200].lower().split()) - common_words
                 specific_words = diff_words | comment_words
                 
+                failed_texts = []
+                
                 for c in range(num_candidates):
                     row = idx * num_candidates + c
                     gen_text = tokenizer.decode(gen_ids[row][prompt_len:], skip_special_tokens=True)
@@ -176,8 +178,10 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
                     # Check decision matches
                     dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL)
                     if not dec_match:
+                        failed_texts.append(gen_text)
                         continue
                     if dec_match.group(1).strip().upper() != expected_decision:
+                        failed_texts.append(gen_text)
                         continue
                     
                     # Extract reasoning
@@ -201,6 +205,10 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
                     cache[cache_key] = best_reasoning
                     success_count += 1
                     valid_count += 1
+                else:
+                    item["teacher_reasoning"] = False  # Track failed
+                    if total_processed == 0: # Print the very first failure for debugging
+                        logger.warning(f"DEBUG: 1st failed generation raw text:\n{failed_texts[0]}")
                     
                 total_processed += 1
                 
