@@ -36,8 +36,14 @@ def start_sglang_server(model_name: str, port: int, dapo_config: dict) -> subpro
     lora_rank = str(dapo_config.get("lora_r", 16))
     lora_targets = dapo_config.get("lora_target_modules", ["q_proj", "k_proj", "v_proj", "o_proj"])
     
-    # Use isolated venv so SGLang's PyTorch doesn't conflict with training env
-    sglang_python = sys.executable
+    # Use dedicated SGLang venv if available (isolates transformers version conflict)
+    sglang_venv = Path(PROJECT_ROOT) / "venv-sglang" / "bin" / "python"
+    if sglang_venv.exists():
+        sglang_python = str(sglang_venv)
+        logger.info(f"Using isolated SGLang venv: {sglang_python}")
+    else:
+        sglang_python = sys.executable
+        logger.warning("No venv-sglang found, using current Python. Transformers version conflicts may occur.")
     
     cmd = [
         sglang_python, "-m", "sglang.launch_server",
