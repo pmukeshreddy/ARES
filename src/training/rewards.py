@@ -38,11 +38,14 @@ def parse_completion(completion: str) -> dict:
             pass
             
     # Extract decision
-    decision_match = re.search(r'<decision>(.*?)</decision>', completion, re.DOTALL)
+    # Model often truncates or finishes before outputting the closing </decision> tag
+    decision_match = re.search(r'<decision>[\s*]*([^<]+)', completion, re.IGNORECASE)
     if decision_match:
         dec = decision_match.group(1).strip().upper()
-        if dec in ["SURFACE", "FILTER"]:
-            parsed["decision"] = dec
+        if "SURFACE" in dec:
+            parsed["decision"] = "SURFACE"
+        elif "FILTER" in dec:
+            parsed["decision"] = "FILTER"
             
     # Calculate format score
     parts_found = sum(1 for v in [parsed["think"], parsed["score"], parsed["decision"]] if v is not None)
