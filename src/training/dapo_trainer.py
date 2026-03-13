@@ -467,8 +467,8 @@ class DAPOTrainer:
                     flat_completions, flat_diffs, flat_comments, flat_labels, flat_example_ids, flat_has_label, self.config, flat_prompts, flat_team_names, flat_rm_scores
                 )
                 
-                if mb_idx == 0:
-                    logger.info(f"  DIAG-FORMAT: The raw valid_format_ratio from rewards.py is {logs['valid_format_ratio']*100:.1f}%")
+                # Print once per batch calculation
+                logger.info(f"  DIAG-FORMAT: The raw valid_format_ratio from rewards.py is {logs['valid_format_ratio']*100:.1f}%")
                 
                 # GDPO: Per-Reward Normalization
                 w_r1, w_r2, w_r3, w_r4, w_r5 = logs["weights"]
