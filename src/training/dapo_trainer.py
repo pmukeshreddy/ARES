@@ -257,6 +257,14 @@ class DAPOTrainer:
         filter_count = sum(1 for item in train_dataset if item.get("label") == 0)
         self.reward_scales.dataset_label_counts = {"surface": surface_count, "filter": filter_count}
         logger.info(f"Dataset label counts for {team_name}: {surface_count} SURFACE / {filter_count} FILTER (w_surface={( surface_count + filter_count) / (2.0 * max(1, surface_count)):.3f}, w_filter={(surface_count + filter_count) / (2.0 * max(1, filter_count)):.3f})")
+        
+        # CONFIG SANITY CHECK: log critical hyperparams so it's obvious if wrong config is loaded
+        logger.info(
+            f"  CONFIG: kl_penalty={self.config.get('kl_penalty', 0.05)}, "
+            f"lr={self.config.get('learning_rate')}, "
+            f"entropy_bonus={self.config.get('entropy_bonus', 0.03)}, "
+            f"r2_weight={self.config.get('r2_weight', 0.60)}"
+        )
                 
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.config["learning_rate"])
         
@@ -652,11 +660,15 @@ class DAPOTrainer:
             # This preserves GDPO per-component weighting while keeping advantage
             # magnitudes large enough to produce meaningful gradients.
             adv_std = flat_advantages.std() + 1e-8
-            # Always normalize to unit variance — standard GRPO behavior
-            # Previous conditional amplification (only when std<0.5) was inconsistent
+            # Floor at 0.5: when all groups are unanimously zero-var (e.g. all-None or all-wrong),
+            # raw std can be ~0.03. Dividing by that amplifies mean from -0.8 to -25, producing
+            # surr=26 and grad_norm=109 that nukes format in a single step.
+            # With floor=0.5, when real variance exists (std>0.5) normalization works normally;
+            # when everything is unanimous, advantages stay at natural ~0.5-1.0 scale.
+            adv_std_floored = max(adv_std.item(), 0.5)
             if step % 5 == 0:
-                logger.info(f"  DIAG-5 Advantage std={adv_std.item():.4f}, normalizing to unit variance")
-            flat_advantages = flat_advantages / adv_std
+                logger.info(f"  DIAG-5 Advantage std={adv_std.item():.4f} (floored to {adv_std_floored:.2f}), normalizing")
+            flat_advantages = flat_advantages / adv_std_floored
             
             # 4. After group normalization, before the loss loop - see final advantage distribution:
             logger.info(
