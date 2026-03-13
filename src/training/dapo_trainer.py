@@ -553,6 +553,13 @@ class DAPOTrainer:
                         
                     for idx in range(oversample_size):
                         flat_idx = g_idx * oversample_size + idx
+                        # Fix: skip invalid-format sequences (decision=None).
+                        # They carry no positive format signal — their negative R4 penalty
+                        # just pushes the model away from specific malformed tokens
+                        # without teaching what correct <think><score><decision> looks like.
+                        seq_decision = parse_completion(flat_completions[flat_idx])["decision"]
+                        if seq_decision is None:
+                            continue
                         accumulated_prompts.append(flat_prompts[flat_idx])
                         accumulated_completions.append(flat_completions[flat_idx])
                         accumulated_advantages.append(group_advs[idx].item())
@@ -726,7 +733,10 @@ class DAPOTrainer:
                         surr2 = ratio_clipped * adv
                         
                         # KL divergence estimator (standard PPO approximation: log(π_theta/π_ref))
-                        kl = curr_logp - ref_logp
+                        # clamp(min=0): KL is only meaningful as a PENALTY when positive (policy drifts
+                        # away from ref). When negative, adding it to the loss would encourage further
+                        # drift under gradient descent (minimizing a negative = making it more negative).
+                        kl = (curr_logp - ref_logp).clamp(min=0)
                         
                         # Token-level entropy of the policy's distribution
                         # H(π) = -Σ p(token) * log(p(token)) at each generated position
