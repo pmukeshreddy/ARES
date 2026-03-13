@@ -57,16 +57,15 @@ def parse_completion(completion: str) -> dict:
     else:
         parsed["format_score"] = -1.0
         
-    # [DEBUG] If we failed to get a perfect format, log it once per run to debug
+    # [DEBUG] Aggressively log all format parsing failures to a file
     if parsed["format_score"] != 1.0:
-        if not hasattr(parse_completion, "has_logged_failure"):
-            logger.info("=== FORMAT PARSING FAILURE DEBUG ===")
-            logger.info(f"Raw completion text:\n{completion}")
-            logger.info(f"Extracted: Think: {'<FOUND>' if parsed['think'] else 'MISSING'}, "
-                        f"Score: {parsed['score'] if parsed['score'] is not None else 'MISSING'}, "
-                        f"Decision: {parsed['decision'] if parsed['decision'] else 'MISSING'}")
-            logger.info("====================================")
-            parse_completion.has_logged_failure = True
+        import os
+        log_file = "format_failures.log"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*50}\n")
+            f.write(f"MISSING: Think={'✅' if parsed['think'] else '❌'}, Score={'✅' if parsed['score'] is not None else '❌'}, Decision={'✅' if parsed['decision'] else '❌'}\n")
+            f.write(f"RAW TEXT:\n{completion}\n")
+            f.write(f"{'='*50}\n")
             
     return parsed
 
