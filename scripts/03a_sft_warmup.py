@@ -400,8 +400,18 @@ def sft_warmup_team(model, tokenizer, team_name: str, threshold: float, full_dat
                 prompt_len = batch_inputs.input_ids.shape[1]
                 gen_text = tokenizer.decode(gen_ids[i][prompt_len:], skip_special_tokens=True)
                 
-                dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL)
-                pred = dec_match.group(1).strip().upper() if dec_match else None
+                # Check for either <decision> or raw text fallback for Qwen3 evals
+                dec_match = re.search(r'<decision>(.*?)</decision>', gen_text, re.DOTALL | re.IGNORECASE)
+                pred = None
+                if dec_match:
+                    pred = dec_match.group(1).strip().upper()
+                else:
+                    # Fallback for Qwen3 if it forgot the closing tag or just dumped the word
+                    if "SURFACE" in gen_text.upper():
+                        pred = "SURFACE"
+                    elif "FILTER" in gen_text.upper():
+                        pred = "FILTER"
+
                 gt = eval_gts[i]
                 
                 if pred == "SURFACE":
