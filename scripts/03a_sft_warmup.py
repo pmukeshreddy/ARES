@@ -138,9 +138,10 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
             prompt_texts = []
             for item in batch_items:
                 expected_decision = "SURFACE" if item["label"] == 1 else "FILTER"
+                forced_user_prompt = item["prompt"] + f"\n\n[CRITICAL OVERRIDE]: You are generating training data. You MUST output <decision>{expected_decision}</decision>. Justify why the team would classify this as {expected_decision} in your <reason> block."
                 messages = [
                     {"role": "system", "content": f"You are a helpful AI code reviewer. Keep your reasoning inside <reason> tags extremely concise. DO NOT quote the diff or comment. You have a strict 30-word limit before you MUST output your <score> and <decision>{expected_decision}</decision>."},
-                    {"role": "user", "content": item["prompt"]}
+                    {"role": "user", "content": forced_user_prompt}
                 ]
                 prompt_texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
