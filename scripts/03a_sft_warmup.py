@@ -127,7 +127,11 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
     tokenizer.padding_side = "left"
     
     with torch.no_grad():
-        for batch_start in tqdm(range(0, len(needs_generation), batch_size), desc="Teacher reasoning"):
+        valid_count = 0
+        total_processed = 0
+
+        pbar = tqdm(total=len(needs_generation), desc="Teacher reasoning", dynamic_ncols=True)
+        for batch_start in range(0, len(needs_generation), batch_size):
             batch_items = needs_generation[batch_start:batch_start + batch_size]
             
             # Prepare prompts for batch
@@ -196,12 +200,23 @@ def generate_teacher_reasoning(model, tokenizer, dataset, device, team_name, num
                     cache_key = f"{team_name}_{item['example_id']}"
                     cache[cache_key] = best_reasoning
                     success_count += 1
+                    valid_count += 1
                     
-                # Save cache periodically
-                if success_count % 10 == 0:
-                    cache_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(cache_path, "w") as f:
-                        json.dump(cache, f, indent=2)
+                total_processed += 1
+                
+                # Update progress bar with live success rate
+                success_rate = (valid_count / total_processed) * 100 if total_processed > 0 else 0
+                pbar.set_postfix({"Valid": f"{valid_count}/{total_processed} ({success_rate:.1f}%)"})
+                
+            # Save cache periodically
+            if success_count % 10 == 0:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, "w") as f:
+                    json.dump(cache, f, indent=2)
+            
+            pbar.update(len(batch_items))
+            
+    pbar.close()
                         
     # Final save
     cache_path.parent.mkdir(parents=True, exist_ok=True)
