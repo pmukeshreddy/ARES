@@ -381,9 +381,7 @@ class DAPOTrainer:
             max_resample_times = self.config.get("max_resample_times", 3)
             target_valid_groups = batch_size  # Need this many groups with variance
             
-            accumulated_prompts = []      # List of flat prompts (each repeated oversample_size times)
-            accumulated_completions = []  # List of flat completions
-            accumulated_advantages = []   # List of flat advantages
+            step_raw_buffer = []          # List of dicts for capping logic
             used_prompt_hashes = set()    # Track which prompts we've already tried
             
             for resample_round in range(max_resample_times + 1):
@@ -580,22 +578,16 @@ class DAPOTrainer:
 
                     for idx in range(oversample_size):
                         flat_idx = g_idx * oversample_size + idx
-                        # Fix 2: Do NOT silently drop None-decision (format-invalid) completions.
-                        # Previously: `if seq_decision is None: continue` caused FILTER selection-bias —
-                        # only structurally-simpler FILTER completions survived into the advantage buffer,
-                        # giving FILTER disproportionate positive advantages → runaway FILTER collapse.
-                        # Now: include None-decision seqs with a fixed punitive advantage of -1.0 so the
-                        # model receives explicit "malformed output = bad" gradient on every step.
-                        seq_decision = zv_decisions[idx]  # Reuse already-parsed decisions
-                        if seq_decision is None:
-                            FORMAT_PENALTY_ADV = -1.0  # Fixed penalty, magnitude matches unit-variance adv scale
-                            accumulated_prompts.append(flat_prompts[flat_idx])
-                            accumulated_completions.append(flat_completions[flat_idx])
-                            accumulated_advantages.append(FORMAT_PENALTY_ADV)
-                        else:
-                            accumulated_prompts.append(flat_prompts[flat_idx])
-                            accumulated_completions.append(flat_completions[flat_idx])
-                            accumulated_advantages.append(group_advs[idx].item())
+                        # Fix 2: Collect all sequences for capping.
+                        seq_decision = zv_decisions[idx]
+                        is_none = seq_decision is None
+                        
+                        step_raw_buffer.append({
+                            "prompt": flat_prompts[flat_idx],
+                            "completion": flat_completions[flat_idx],
+                            "advantage": -1.0 if is_none else group_advs[idx].item(),
+                            "decision": seq_decision
+                        })
                 
                 if step % 5 == 0 and n_zero_var > 0:
                     logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups ({n_zero_var - n_zero_var_penalized} skipped correct, {n_zero_var_penalized} penalized wrong)")
@@ -614,24 +606,35 @@ class DAPOTrainer:
                             f"decisions={group_decs}"
                         )
 
-                # Fix #1: Use n_valid_round (group count) not completion-count-based proxy
+                # Fix #1: Use n_valid_round (group count)
                 n_valid = n_valid_round
-                logger.info(f"  DEBUG valid_groups: n_valid_round={n_valid_round}, accumulated_seqs={len(accumulated_advantages)}, target={target_valid_groups}")
+                logger.info(f"  DEBUG valid_groups: n_valid_round={n_valid_round}, total_seqs={len(step_raw_buffer)}, target={target_valid_groups}")
                 if n_valid >= target_valid_groups:
                     break
                 
                 if resample_round < max_resample_times:
                     logger.info(f"  Step {step}: resampling ({n_valid}/{target_valid_groups} valid groups)")
             
-            # If we still have nothing after all resample rounds, skip this step
-            if len(accumulated_advantages) == 0:
-                logger.warning(f"  Step {step}: no valid groups, skipping.")
-                continue
+            # ── Fix 2: None-Decision Capping ────────────────────────────
+            none_entries = [e for e in step_raw_buffer if e["decision"] is None]
+            valid_entries = [e for e in step_raw_buffer if e["decision"] is not None]
             
-            # Normalize accumulated advantages across all valid groups
-            flat_prompts = accumulated_prompts
-            flat_completions = accumulated_completions
-            flat_advantages = torch.tensor(accumulated_advantages, dtype=torch.float32, device=self.device)
+            # Cap None-entries at 30% of total sequences in the final buffer
+            if valid_entries:
+                max_none = int((0.3 / 0.7) * len(valid_entries))
+                if len(none_entries) > max_none:
+                    import random as _random
+                    none_entries = _random.sample(none_entries, max_none)
+            else:
+                # Fallback: keep some None entries if the model is 100% format-collapsed
+                none_entries = none_entries[:batch_size]
+            
+            final_buffer = valid_entries + none_entries
+            random.shuffle(final_buffer)
+            
+            flat_prompts = [e["prompt"] for e in final_buffer]
+            flat_completions = [e["completion"] for e in final_buffer]
+            flat_advantages = torch.tensor([e["advantage"] for e in final_buffer], dtype=torch.float32, device=self.device)
             
             # Compute S:F ratio & Address Rate for this step
             sf_ratio = n_surface_pred / max(1, n_filter_pred)
@@ -768,12 +771,12 @@ class DAPOTrainer:
                         )
                         surr2 = ratio_clipped * adv
                         
-                        # Fix 3: Use full two-sided KL estimator — the original .clamp(min=0) silenced the
-                        # penalty whenever curr_logp < ref_logp (policy more constrained than ref on
-                        # visited tokens), which is the wrong direction during policy drift. Full log-ratio
-                        # is the standard PPO/DAPO KL approximation; negative values are penalized like
-                        # positive ones, keeping the policy anchored symmetrically around the SFT reference.
-                        kl = curr_logp - ref_logp  # Fix 3: no clamp; full two-sided log-ratio
+                        # Fix 3: Symmetric Schulman KL Estimator — exp(log_ratio) - 1 - log_ratio.
+                        # This is always non-negative and penalizes drift in BOTH directions (policy
+                        # becoming more OR less certain than ref), preventing the anti-anchoring
+                        # that occurs when minimizing raw log-ratios that can go negative.
+                        log_ratio = curr_logp - ref_logp
+                        kl = torch.exp(log_ratio) - 1 - log_ratio
                         
                         # Token-level entropy of the policy's distribution
                         # H(π) = -Σ p(token) * log(p(token)) at each generated position
