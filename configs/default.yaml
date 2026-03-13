@@ -82,7 +82,7 @@ embeddings:
 
 # ─── Phase 2 DAPO ───────────
 dapo:
-  model_name: "Qwen/Qwen3-4B-Instruct-2507"
+  model_name: "Qwen/Qwen3.5-4B"
   output_dir: "checkpoints/dapo"
   precomputed_scores_path: "data/precomputed_rm_scores.json"
   unlabeled_data_path: "data/unlabeled_pairs.json"
@@ -112,7 +112,7 @@ dapo:
   entropy_bonus: 0.01    # Token-level entropy bonus to prevent policy collapse
   temperature: 0.8       # Generation temperature (was 1.0, lowered to reduce invalid format)
   decision_token_boost: 5.0  # Boost gradient on <decision> tokens to fix reward dilution
-  max_new_tokens: 512
+  max_new_tokens: 256
   
   # Reward Weights
   r1_weight: 0.15      # Reasoning quality (was 0.10)
