@@ -632,6 +632,10 @@ class DAPOTrainer:
             final_buffer = valid_entries + none_entries
             random.shuffle(final_buffer)
             
+            if len(final_buffer) == 0:
+                logger.warning(f"  Step {step}: no valid sequences after capping, skipping.")
+                continue
+            
             flat_prompts = [e["prompt"] for e in final_buffer]
             flat_completions = [e["completion"] for e in final_buffer]
             flat_advantages = torch.tensor([e["advantage"] for e in final_buffer], dtype=torch.float32, device=self.device)
