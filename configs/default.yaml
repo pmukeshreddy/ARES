@@ -96,7 +96,7 @@ dapo:
   # Training
   batch_size: 8          # 8 prompts × 8 completions = 64 (same as before, less noise)
   grad_accum_steps: 2    # Accumulate over 4 batches → 32 prompts per update
-  learning_rate: 5.0e-5
+  learning_rate: 2.0e-5
   lr_schedule: cosine          # cosine decay to prevent late-stage oscillation
   max_steps: 100
   eval_at_steps: [20, 40, 60, 80, 100]
@@ -108,7 +108,7 @@ dapo:
   clip_ratio_high: 0.20
   dynamic_sampling: true
   token_level_loss: true
-  kl_penalty: 0.05   # Non-zero anchor to prevent unbounded policy drift / format death
+  kl_penalty: 1.0    # Fix 1: 20× increase — KL was 200× weaker than surrogate, ref anchor was dead
   ppo_epochs: 1      # Single-pass (set to 3 to enable multi-epoch PPO clipping)
   entropy_bonus: 0.01    # Token-level entropy bonus to prevent policy collapse
   temperature: 0.8       # Generation temperature (was 1.0, lowered to reduce invalid format)

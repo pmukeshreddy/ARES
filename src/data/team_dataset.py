@@ -21,7 +21,7 @@ TEAM_PROFILES = {
             "- Pure style/formatting with no functional impact\n"
             "- Subjective preferences with no clear improvement"
         ),
-        "rm_threshold": 0.85
+        "rm_threshold": 0.65  # Fix 4: was 0.85 — sat top-15% of score dist, gave FILTER 2-3× larger margins than SURFACE
     },
     "Thorough-Mentors": {
         "context": (

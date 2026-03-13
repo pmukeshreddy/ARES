@@ -580,16 +580,22 @@ class DAPOTrainer:
 
                     for idx in range(oversample_size):
                         flat_idx = g_idx * oversample_size + idx
-                        # Skip invalid-format sequences (decision=None).
-                        # They carry no positive format signal — their negative R4 penalty
-                        # just pushes the model away from specific malformed tokens
-                        # without teaching what correct <think><score><decision> looks like.
+                        # Fix 2: Do NOT silently drop None-decision (format-invalid) completions.
+                        # Previously: `if seq_decision is None: continue` caused FILTER selection-bias —
+                        # only structurally-simpler FILTER completions survived into the advantage buffer,
+                        # giving FILTER disproportionate positive advantages → runaway FILTER collapse.
+                        # Now: include None-decision seqs with a fixed punitive advantage of -1.0 so the
+                        # model receives explicit "malformed output = bad" gradient on every step.
                         seq_decision = zv_decisions[idx]  # Reuse already-parsed decisions
                         if seq_decision is None:
-                            continue
-                        accumulated_prompts.append(flat_prompts[flat_idx])
-                        accumulated_completions.append(flat_completions[flat_idx])
-                        accumulated_advantages.append(group_advs[idx].item())
+                            FORMAT_PENALTY_ADV = -1.0  # Fixed penalty, magnitude matches unit-variance adv scale
+                            accumulated_prompts.append(flat_prompts[flat_idx])
+                            accumulated_completions.append(flat_completions[flat_idx])
+                            accumulated_advantages.append(FORMAT_PENALTY_ADV)
+                        else:
+                            accumulated_prompts.append(flat_prompts[flat_idx])
+                            accumulated_completions.append(flat_completions[flat_idx])
+                            accumulated_advantages.append(group_advs[idx].item())
                 
                 if step % 5 == 0 and n_zero_var > 0:
                     logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups ({n_zero_var - n_zero_var_penalized} skipped correct, {n_zero_var_penalized} penalized wrong)")
@@ -762,11 +768,12 @@ class DAPOTrainer:
                         )
                         surr2 = ratio_clipped * adv
                         
-                        # KL divergence estimator (standard PPO approximation: log(π_theta/π_ref))
-                        # clamp(min=0): KL is only meaningful as a PENALTY when positive (policy drifts
-                        # away from ref). When negative, adding it to the loss would encourage further
-                        # drift under gradient descent (minimizing a negative = making it more negative).
-                        kl = (curr_logp - ref_logp).clamp(min=0)
+                        # Fix 3: Use full two-sided KL estimator — the original .clamp(min=0) silenced the
+                        # penalty whenever curr_logp < ref_logp (policy more constrained than ref on
+                        # visited tokens), which is the wrong direction during policy drift. Full log-ratio
+                        # is the standard PPO/DAPO KL approximation; negative values are penalized like
+                        # positive ones, keeping the policy anchored symmetrically around the SFT reference.
+                        kl = curr_logp - ref_logp  # Fix 3: no clamp; full two-sided log-ratio
                         
                         # Token-level entropy of the policy's distribution
                         # H(π) = -Σ p(token) * log(p(token)) at each generated position
