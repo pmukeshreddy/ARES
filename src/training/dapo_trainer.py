@@ -247,7 +247,11 @@ class DAPOTrainer:
                     torch.nn.init.normal_(param, std=0.01)
                     
         self.model.set_adapter("default")
-        
+
+        # Fix #2: Diagnostic — confirm whether sft_ref adapter is actually loaded
+        # If this says only ['default'], the ref falls back to bare base model → mean_ratio explosion.
+        logger.info(f"  DEBUG peft_config keys at training start: {list(self.model.peft_config.keys())}")
+
         # Compute dataset-level label counts for stable inverse class frequency weighting in R2
         surface_count = sum(1 for item in train_dataset if item.get("label") == 1)
         filter_count = sum(1 for item in train_dataset if item.get("label") == 0)
@@ -516,23 +520,42 @@ class DAPOTrainer:
                     logger.info(f"  DIAG-1 Total adv std={total_std:.4f}, R2 contributes {r2_contribution*100:.1f}% of |advantage|")
                 
                 # Accumulate valid groups
+                # Fix #1: Track n_valid_groups_round as the number of groups that passed the
+                # zero-var test, REGARDLESS of how many completions within them are valid-format.
+                # Previously, `n_valid = len(accumulated_advantages) // oversample_size` was
+                # used, which falls short when invalid-format completions are filtered out before
+                # appending, causing endless resampling even when all groups are genuinely valid.
                 n_zero_var = 0
                 n_zero_var_penalized = 0
-                n_valid_round = 0
+                n_valid_round = 0  # Counts groups that contributed to accumulated_advantages
                 for g_idx in range(advantages.size(0)):
                     # Check zero-variance using RAW R2 rewards (before mean-subtraction)
                     # so we can distinguish correct vs. wrong uniform groups.
                     g_r2_raw_std = r2_tensor[g_idx].std().item()
                     g_r2_raw_mean = r2_tensor[g_idx].mean().item()
                     
+                    # Fix #4: Check if this is an all-invalid-format group (all None decisions).
+                    # R2 returns 0.0 for None decisions, so an all-None group has r2_mean=0 AND
+                    # r2_std=0. Previously this was silently classified as "uniformly correct" and
+                    # skipped — but it's not correct, it's just all-invalid. Detect and penalize.
+                    zv_decisions = [parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]
+                    zv_majority = max(set(zv_decisions), key=zv_decisions.count) if any(d is not None for d in zv_decisions) else None
+                    all_invalid_format = all(d is None for d in zv_decisions)
+
                     if g_r2_raw_std < 1e-5:
                         n_zero_var += 1
                         if step % 5 == 0:
                             zv_label = flat_labels[g_idx * oversample_size]
-                            zv_decisions = [parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]
-                            zv_majority = max(set(zv_decisions), key=zv_decisions.count) if zv_decisions else None
 
-                        if g_r2_raw_mean >= 0:
+                        if all_invalid_format:
+                            # Fix #4: All-None group — not "correct", just unparseable.
+                            # Penalize with a small fixed negative advantage to teach format.
+                            n_zero_var_penalized += 1
+                            constant_neg_adv = -0.5 * w_r2  # Mild fixed penalty for all-invalid
+                            group_advs = torch.full((oversample_size,), constant_neg_adv, dtype=torch.float32, device=self.device)
+                            if step % 5 == 0:
+                                logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority=None, r2_mean={g_r2_raw_mean:.3f} → PENALIZED (all-invalid-format, adv={constant_neg_adv:.3f})")
+                        elif g_r2_raw_mean >= 0:
                             # Uniformly CORRECT (all right decisions with same reward).
                             # No gradient signal needed — skip.
                             if step % 5 == 0:
@@ -548,16 +571,20 @@ class DAPOTrainer:
                             if step % 5 == 0:
                                 logger.info(f"  DIAG-2 ZeroVar group {g_idx}: label={zv_label}, majority={zv_majority}, r2_mean={g_r2_raw_mean:.3f} → PENALIZED (wrong, adv={constant_neg_adv:.3f})")
                     else:
-                        n_valid_round += 1
                         group_advs = advantages[g_idx]
-                        
+
+                    # Fix #1: Count this group as valid now (before filtering completions within it).
+                    # This ensures invalid-format completions within a valid group don't prevent
+                    # the group from being counted toward target_valid_groups.
+                    n_valid_round += 1
+
                     for idx in range(oversample_size):
                         flat_idx = g_idx * oversample_size + idx
-                        # Fix: skip invalid-format sequences (decision=None).
+                        # Skip invalid-format sequences (decision=None).
                         # They carry no positive format signal — their negative R4 penalty
                         # just pushes the model away from specific malformed tokens
                         # without teaching what correct <think><score><decision> looks like.
-                        seq_decision = parse_completion(flat_completions[flat_idx])["decision"]
+                        seq_decision = zv_decisions[idx]  # Reuse already-parsed decisions
                         if seq_decision is None:
                             continue
                         accumulated_prompts.append(flat_prompts[flat_idx])
@@ -566,21 +593,24 @@ class DAPOTrainer:
                 
                 if step % 5 == 0 and n_zero_var > 0:
                     logger.info(f"  DIAG-2 SUMMARY: {n_zero_var} zero-var groups ({n_zero_var - n_zero_var_penalized} skipped correct, {n_zero_var_penalized} penalized wrong)")
-                        
-                # 3. After advantage computation, before the zero-variance check - see what the model is actually working with:
+
+                # Log group-level debug info
                 if step % 5 == 0:
                     for g_idx in range(advantages.size(0)):
                         g = advantages[g_idx]
                         g_r2 = adv_r2[g_idx]
+                        group_decs = [parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]
                         logger.info(
                             f"  DEBUG Group {g_idx}: adv std={g.std().item():.4f}, "
                             f"min={g.min().item():.3f}, max={g.max().item():.3f}, "
                             f"r2_adv std={g_r2.std().item():.4f}, "
                             f"label={flat_labels[g_idx*oversample_size]}, "
-                            f"decisions={[parse_completion(flat_completions[g_idx*oversample_size+i])['decision'] for i in range(oversample_size)]}"
+                            f"decisions={group_decs}"
                         )
-                
-                n_valid = len(accumulated_advantages) // oversample_size
+
+                # Fix #1: Use n_valid_round (group count) not completion-count-based proxy
+                n_valid = n_valid_round
+                logger.info(f"  DEBUG valid_groups: n_valid_round={n_valid_round}, accumulated_seqs={len(accumulated_advantages)}, target={target_valid_groups}")
                 if n_valid >= target_valid_groups:
                     break
                 

@@ -202,8 +202,11 @@ class DAPORewardScales:
             self._ema_rate_diff = rate_diff
         else:
             self._ema_rate_diff = 0.7 * self._ema_rate_diff + 0.3 * rate_diff
-            
-        bias_penalty = 1.0 + (self._ema_rate_diff * 3.0) # Smoothed multiplier
+
+        # Fix #3: Cap bias_penalty at 1.5 to prevent a positive feedback loop during format collapse.
+        # When format collapses, pred_surface_rate → 0 (all None decisions), rate_diff grows,
+        # penalty grows to 4×, causing more negative advantages → more collapse.
+        bias_penalty = min(1.5, 1.0 + (self._ema_rate_diff * 3.0))  # Smoothed multiplier, capped
             
         rewards = []
         for dec, label, h, team_name, rm_score in zip(decisions, ground_truth_labels, has_label, team_names, rm_scores):
